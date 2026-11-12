@@ -17,6 +17,15 @@ module.exports = {
       String(username || '').trim().replace(/^@+/, '').toLowerCase()),
   outDir: path.join(__dirname, 'out'),
 
+  // 累积存储：历次运行采过的帖子 + 意向客户名单都攒在 data/store.json，
+  // 跨运行去重（采过的帖子默认跳过、名单只增不重）。纯本地数据，
+  // 已被 .gitignore 排除（data/ 整夹不进仓库）。
+  dataDir: path.join(__dirname, 'data'),
+  storeFile: path.join(__dirname, 'data', 'store.json'),
+
+  // 图形控制台（--gui）监听端口：只绑 127.0.0.1，不对外。
+  guiPort: 3212,
+
   // 会话文件目录：登录成功导出的 <用户名>.storage.json 存这里（等同 TG 的 .session，
   // 是账号钥匙，只放本机，绝不能分享/上传/发聊天，见 sessions/README-警告.md）
   sessionsDir: path.join(__dirname, 'sessions'),

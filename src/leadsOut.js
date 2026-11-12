@@ -14,9 +14,18 @@ function profileUrl(username) {
   return 'https://www.instagram.com/' + username + '/';
 }
 
-function buildLeadsRows(items) {
-  const rows = [];
-  const seen = new Set();
+// 明细版（累积存储用）：[{ username, profileUrl, comment, keyword }]，
+// keyword 是这条评论所在帖子的 keyword 字段（帖子条目上的标记，多关键词
+// 运行时才有区分；单关键词时就是那个词，帖上没标时为 ''）。
+// 筛选/去重口径与 buildLeadsRows 完全一致——buildLeadsRows 就是在它上面
+// 砍掉 username/keyword 两列，全工具只此一份判定，不会两边漂移。
+// 全量版（不去重）：每个帖子里每条合格评论一条 entry，带它所在帖子的
+// keyword。口径（意向限定、剔除帖主自评、跳过空用户名/空评论）和去重版
+// 完全一致——去重版就是在它上面按 用户名+评论 折叠。累积存储要用这个
+// 版本：同一条线索在多个关键词下出现时，每个关键词都要能记进它的
+// keywords 列表，先去重再合并就会把后面的关键词弄丢。
+function buildLeadsEntriesAll(items) {
+  const entries = [];
   const list = Array.isArray(items) ? items : [];
   for (const post of list) {
     if (!post || typeof post !== 'object') continue;
@@ -24,6 +33,7 @@ function buildLeadsRows(items) {
     const comments = Array.isArray(post.latestComments) ? post.latestComments : null;
     if (!comments) continue;
     const owner = String(post.ownerUsername || '').trim();
+    const keyword = typeof post.keyword === 'string' ? post.keyword : '';
     for (const c of comments) {
       if (!c || typeof c !== 'object') continue;
       const username = String(c.ownerUsername || '').trim();
@@ -31,13 +41,26 @@ function buildLeadsRows(items) {
       if (!username || !text.trim()) continue;
       if (!Array.isArray(c.intentTypes) || c.intentTypes.length === 0) continue;
       if (owner && username === owner) continue; // 商家自评，不是线索
-      const key = username + '|' + text;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      rows.push({ profileUrl: profileUrl(username), comment: text });
+      entries.push({ username: username, profileUrl: profileUrl(username), comment: text, keyword: keyword });
     }
   }
-  return rows;
+  return entries;
+}
+
+function buildLeadsEntries(items) {
+  const entries = [];
+  const seen = new Set();
+  for (const e of buildLeadsEntriesAll(items)) {
+    const key = e.username + '|' + e.comment;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push(e);
+  }
+  return entries;
+}
+
+function buildLeadsRows(items) {
+  return buildLeadsEntries(items).map((e) => ({ profileUrl: e.profileUrl, comment: e.comment }));
 }
 
 // CSV 字段转义：含逗号/引号/换行时用双引号包起来，内部引号翻倍。
@@ -55,4 +78,4 @@ function toCsv(rows) {
   return '\uFEFF' + lines.join('\r\n') + '\r\n'; // 开头是 UTF-8 BOM
 }
 
-module.exports = { buildLeadsRows, toCsv, profileUrl };
+module.exports = { buildLeadsRows, buildLeadsEntries, buildLeadsEntriesAll, toCsv, profileUrl };

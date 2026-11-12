@@ -3,6 +3,8 @@
 browser-profile/
 out/
 node_modules/
+# data/ 是累积存储（store.json：采过的帖子 + 累积客户名单），纯本地数据不进仓库。
+data/
 # accounts.txt 里是账号密码和 TOTP 密钥，同样绝不能提交/分享/上传。
 accounts.txt
 # cookies.txt / cookies.json 是卖家给的会话文件（文件 = 账号钥匙），同样绝不能提交/分享/上传。

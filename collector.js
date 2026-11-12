@@ -23,6 +23,8 @@ const browserLaunch = require('./src/browserLaunch');
 const filters = require('./src/filters');
 const intent = require('./src/intent');
 const leadsOut = require('./src/leadsOut');
+const storeMod = require('./src/store');
+const xlsxMod = require('./src/xlsx');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const randInt = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
@@ -34,11 +36,29 @@ console.log([
 '本地 IG 采集引擎（原型）— 用法：',
 '',
 ' node collector.js --keyword <关键词> [--posts N] [--comments N]',
+' node collector.js --gui            打开图形控制台（网页里点按钮采集）',
+' node collector.js --export-xlsx    只导出累积名单 Excel，不采集',
 '',
 '参数：',
-' --keyword 必填。话题关键词，如 downjacket（可带空格/#，会自动处理成话题名）',
-' --posts 本次最多采多少条帖子，默认 50（已是硬上限）',
+' --keyword 话题关键词，如 downjacket（可带空格/#，会自动处理成话题名）。',
+'    可重复写多个（一轮最多 10 个），也可用英文逗号分隔，如',
+'    --keyword downjacket,pufferjacket；--keywords 是同义写法。',
+'    多个关键词在同一个浏览器会话里按顺序跑（只登录一次），每个关键词',
+'    各有一份小结，名单合并去重后一起出。采集时至少给一个关键词',
+'    （--gui / --export-xlsx / --check-cookies 除外）。',
+' --posts 本次每个关键词最多采多少条帖子，默认 50（已是硬上限）',
 ' --comments 每条帖子最多读多少条评论，默认 50',
+' --rescan 重采以前采过的帖子。默认会先查累积存储（data/store.json）：',
+'    话题页找到的帖子链接里，以前采过的整帖跳过（每个关键词都会报',
+'    “跳过已采帖子 N 条”）；采过的帖子和意向名单都攒在累积存储里，',
+'    每轮结束还会把整个累积名单导出成 out/leads-all-<时间>.csv。',
+' --export-xlsx [路径] 只把累积名单导出成 Excel（两列：用户链接、',
+'    评论内容）就退出，不采集、不开浏览器；不给路径时写到',
+'    out/leads-all.xlsx。',
+' --gui 打开图形控制台：http://127.0.0.1:3212（只绑本机，外面访问',
+'    不到）。页面里填关键词（一行一个）、点「开始采集」，日志实时滚，',
+'    累计帖子/线索/用户三个统计，导出 Excel / CSV 按钮都有。点开始',
+'    之前不会打开浏览器；登录走和命令行完全一样的自动模式。',
 ' --max-age-days N 只采最近 N 天内发布的帖子，默认 365；0 = 不限。',
 '    太旧的帖子在读评论之前就跳过（省时间）；发布时间读不到的照常采。',
 ' --keep-all 关掉评论意向预筛。默认只保留带购买意向的评论（问购买/问价格/',
@@ -88,8 +108,29 @@ function cleanKeyword(raw) {
 return String(raw || '').replace(/^#+/, '').replace(/\s+/g, '').trim();
 }
 
+// 一轮最多跑多少个关键词（和图形控制台同口径）。
+const MAX_KEYWORDS = 10;
+
+// 把多次 --keyword / --keywords 给的原始值收拾成话题列表：每个值可再用
+// 英文逗号分隔；逐个清洗（去 # 和空格）、去空、去重、最多 MAX_KEYWORDS 个。
+function normalizeKeywords(inputs) {
+const out = [];
+const seen = new Set();
+for (const raw of Array.isArray(inputs) ? inputs : []) {
+for (const piece of String(raw == null ? '' : raw).split(',')) {
+const kw = cleanKeyword(piece);
+if (!kw || seen.has(kw)) continue;
+seen.add(kw);
+out.push(kw);
+if (out.length >= MAX_KEYWORDS) return out;
+}
+}
+return out;
+}
+
 function parseArgs(argv) {
-const args = { keyword: '', posts: config.limits.postsDefault, comments: config.limits.commentsDefault, headless: false, help: false, account: '', manual: false, importSession: '', importCookies: '', cookiesDir: config.cookiesDir, browser: '', checkCookies: false, maxAgeDays: 365, keepAll: false, merchantFilter: false };
+const args = { keyword: '', keywords: [], posts: config.limits.postsDefault, comments: config.limits.commentsDefault, headless: false, help: false, account: '', manual: false, importSession: '', importCookies: '', cookiesDir: config.cookiesDir, browser: '', checkCookies: false, maxAgeDays: 365, keepAll: false, merchantFilter: false, rescan: false, gui: false, exportXlsx: null };
+const keywordInputs = [];
 for (let i = 0; i < argv.length; i++) {
 const a = argv[i];
 if (a === '--help' || a === '-h') args.help = true;
@@ -97,6 +138,14 @@ else if (a === '--check-cookies') args.checkCookies = true;
 else if (a === '--headless') args.headless = true;
 else if (a === '--manual') args.manual = true;
 else if (a === '--keep-all') args.keepAll = true;
+else if (a === '--rescan') args.rescan = true;
+else if (a === '--gui') args.gui = true;
+else if (a === '--export-xlsx') {
+const nxt = argv[i + 1];
+if (nxt !== undefined && !String(nxt).startsWith('--')) { args.exportXlsx = String(argv[++i]).trim(); }
+else args.exportXlsx = '';
+}
+else if (a.startsWith('--export-xlsx=')) args.exportXlsx = a.slice('--export-xlsx='.length).trim();
 else if (a === '--merchant-filter') args.merchantFilter = true;
 else if (a === '--no-merchant-filter') args.merchantFilter = false;
 else if (a === '--max-age-days') args.maxAgeDays = parseInt(argv[++i], 10);
@@ -111,13 +160,17 @@ else if (a === '--browser') args.browser = String(argv[++i] || '').trim().toLowe
 else if (a.startsWith('--browser=')) args.browser = a.slice('--browser='.length).trim().toLowerCase();
 else if (a === '--account') args.account = String(argv[++i] || '').trim();
 else if (a.startsWith('--account=')) args.account = a.slice('--account='.length).trim();
-else if (a === '--keyword') args.keyword = cleanKeyword(argv[++i] || '');
+else if (a === '--keyword') keywordInputs.push(argv[++i] || '');
+else if (a === '--keywords') keywordInputs.push(argv[++i] || '');
 else if (a === '--posts') args.posts = parseInt(argv[++i], 10);
 else if (a === '--comments') args.comments = parseInt(argv[++i], 10);
-else if (a.startsWith('--keyword=')) args.keyword = cleanKeyword(a.slice('--keyword='.length));
+else if (a.startsWith('--keyword=')) keywordInputs.push(a.slice('--keyword='.length));
+else if (a.startsWith('--keywords=')) keywordInputs.push(a.slice('--keywords='.length));
 else if (a.startsWith('--posts=')) args.posts = parseInt(a.slice('--posts='.length), 10);
 else if (a.startsWith('--comments=')) args.comments = parseInt(a.slice('--comments='.length), 10);
 }
+args.keywords = normalizeKeywords(keywordInputs);
+args.keyword = args.keywords.length > 0 ? args.keywords[0] : '';
 if (!args.browser) args.browser = String(process.env.IG_COLLECTOR_BROWSER || '').trim().toLowerCase();
 if (!Number.isFinite(args.posts) || args.posts < 1) args.posts = config.limits.postsDefault;
 args.posts = Math.min(args.posts, config.limits.postsMax);
@@ -269,17 +322,46 @@ return null;
 }
 }
 
-function saveOutput(output) {
-fs.mkdirSync(config.outDir, { recursive: true});
+// 收尾保存，产出三份文件（同一时间戳对应）：
+// 1) collect-<标记>-<时间>.json：本轮完整记录（主 JSON，字段原样不动）。
+// 2) leads-<标记>-<时间>.csv：本轮名单，两列（用户链接、评论内容），
+//    多关键词时跨词合并去重——这就是给人看的最终交付物。
+// 3) leads-all-<时间>.csv：先把本轮成果并入累积存储（data/store.json：
+//    采过的帖子 + 意向名单，跨运行去重），再把整个累积名单导出成同样的
+//    两列 CSV。mergeCtx = { storeState, checkedPosts, fileTag }；
+//    storeState 为空（如纯函数测试）时跳过累积这步。
+function saveOutput(output, mergeCtx) {
+fs.mkdirSync(config.outDir, { recursive: true });
 const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-const file = path.join(config.outDir, 'collect-' + output.keyword + '-' + ts + '.json');
+const ctx = mergeCtx || {};
+const tag = ctx.fileTag || output.keyword;
+const file = path.join(config.outDir, 'collect-' + tag + '-' + ts + '.json');
 fs.writeFileSync(file, JSON.stringify(output, null, 2), 'utf8');
-// 最终交付物：两列客户名单 CSV（只有 用户链接 + 评论内容），与主 JSON
-// 用同一时间戳同名对应。主 JSON 是完整记录，保持原样不动。
 const rows = leadsOut.buildLeadsRows(output.items);
-const leadsFile = path.join(config.outDir, 'leads-' + output.keyword + '-' + ts + '.csv');
+const leadsFile = path.join(config.outDir, 'leads-' + tag + '-' + ts + '.csv');
 fs.writeFileSync(leadsFile, leadsOut.toCsv(rows), 'utf8');
-return { file: file, leadsFile: leadsFile, leadsCount: rows.length };
+const result = { file: file, leadsFile: leadsFile, leadsCount: rows.length, allFile: null, allCount: 0, addedPosts: 0, addedLeads: 0 };
+if (ctx.storeState) {
+const merged = storeMod.mergeRun(ctx.storeState, {
+posts: Array.isArray(ctx.checkedPosts) ? ctx.checkedPosts : [],
+// 合并用不去重的全量版：同一线索在多个关键词下出现，每个关键词都要
+// 记进它在存储里的 keywords 列表（本轮 CSV 用的是去重版，口径分开）。
+leads: leadsOut.buildLeadsEntriesAll(output.items),
+now: new Date().toISOString(),
+});
+result.addedPosts = merged.addedPosts;
+result.addedLeads = merged.addedLeads;
+try {
+storeMod.saveStore(config.storeFile, ctx.storeState);
+} catch (e) {
+console.log('累积存储保存失败（不影响本轮结果文件）：' + (e && e.message ? e.message.split('\n')[0] : e));
+}
+const allRows = storeMod.leadsRows(ctx.storeState);
+result.allCount = allRows.length;
+result.allFile = path.join(config.outDir, 'leads-all-' + ts + '.csv');
+fs.writeFileSync(result.allFile, leadsOut.toCsv(allRows), 'utf8');
+}
+return result;
 }
 
 // 尽力识别当前登录的用户名：先走页面自己的 current_user 接口，再退回头像 alt 文本
@@ -708,7 +790,13 @@ const args = parseArgs(argv);
 if (args.checkCookies) {
 return runCheckCookies(args);
 }
-if (args.help ||!args.keyword) {
+if (args.gui) {
+return runGui();
+}
+if (args.exportXlsx !== null) {
+return runExportXlsx(args);
+}
+if (args.help || !args.keyword) {
 printUsage();
 return 0;
 }
@@ -716,6 +804,89 @@ if (args.browser && !browserLaunch.isValidChoice(args.browser)) {
 console.log('错误：--browser 只能是 chrome / msedge / chromium（或用环境变量 IG_COLLECTOR_BROWSER），你给的是：' + args.browser);
 return 1;
 }
+return runCollectFromArgs(args, { stopFlag: { stopped: false } });
+}
+
+// --gui：打开图形控制台并挂住进程（服务在点「开始采集」前不碰浏览器）。
+// runner 就接本文件的 runCollect，和命令行同一条流水线、同样的自动模式。
+async function runGui() {
+const gui = require('./src/gui');
+gui.createGuiServer({
+port: config.guiPort,
+runner: (runOpts, control) => runCollect({
+keywords: runOpts.keywords,
+posts: runOpts.posts,
+log: runOpts.log,
+control: control,
+}),
+});
+console.log('IG 采集控制台已打开：http://127.0.0.1:' + config.guiPort + '/');
+console.log('在网页里填关键词、点「开始采集」；没点开始之前不会打开浏览器。用完关掉这个终端窗口即可停掉控制台。');
+await new Promise(() => { /* 挂住进程，等用户关窗口 */ });
+return 0;
+}
+
+// --export-xlsx：只把累积存储里的名单导成 Excel 退出，不采集、不开浏览器。
+function runExportXlsx(args) {
+const target = args.exportXlsx ? args.exportXlsx : path.join(config.outDir, 'leads-all.xlsx');
+const loaded = storeMod.loadStore(config.storeFile);
+if (loaded.corrupt) {
+console.log('警告：累积存储 data/store.json 已损坏、读不出来，本次按空名单导出。');
+}
+const rows = storeMod.leadsRows(loaded.store);
+fs.mkdirSync(path.dirname(target), { recursive: true });
+const n = xlsxMod.exportLeadsXlsx(rows, target);
+console.log('已导出累计名单 Excel：共 ' + n + ' 条 → ' + target + '（只有两列：用户链接、评论内容）');
+return 0;
+}
+
+// 程序化入口（图形控制台用）：opts = { keywords 或 keyword, posts,
+// comments, maxAgeDays, keepAll, merchantFilter, rescan, headless,
+// account, manual, log, control }。log 给了函数时，本轮所有 console.log
+// 在打到终端的同时也镜像一份给它（控制台页面靠它实时显示）。
+async function runCollect(opts) {
+const o = opts || {};
+const args = argsFromOptions(o);
+const control = o.control || { stopFlag: { stopped: false } };
+if (typeof o.log === 'function') {
+const origLog = console.log;
+console.log = function () {
+origLog.apply(console, arguments);
+try {
+o.log(Array.prototype.map.call(arguments, (x) => (typeof x === 'string' ? x : String(x))).join(' '));
+} catch (_) { /* 日志镜像失败不影响采集 */ }
+};
+try {
+return await runCollectFromArgs(args, control);
+} finally {
+console.log = origLog;
+}
+}
+return runCollectFromArgs(args, control);
+}
+
+// 把程序化 opts 拼成和命令行 parseArgs 同形状的 args（默认值同一来源）。
+function argsFromOptions(o) {
+const base = parseArgs([]);
+const kwInput = Array.isArray(o.keywords) ? o.keywords : (o.keyword ? [o.keyword] : []);
+base.keywords = normalizeKeywords(kwInput);
+base.keyword = base.keywords.length > 0 ? base.keywords[0] : '';
+if (Number.isFinite(o.posts)) base.posts = Math.min(Math.max(1, Math.floor(o.posts)), config.limits.postsMax);
+if (Number.isFinite(o.comments)) base.comments = Math.min(Math.max(1, Math.floor(o.comments)), config.limits.commentsMax);
+if (Number.isFinite(o.maxAgeDays) && o.maxAgeDays >= 0) base.maxAgeDays = o.maxAgeDays;
+if (o.keepAll) base.keepAll = true;
+if (o.merchantFilter) base.merchantFilter = true;
+if (o.rescan) base.rescan = true;
+if (o.headless) base.headless = true;
+if (o.manual) base.manual = true;
+if (o.account) base.account = String(o.account);
+return base;
+}
+
+async function runCollectFromArgs(args, control) {
+// 外部停止开关（图形控制台的「停止」按钮）：置位后逐帖循环/滚动循环
+// 在下一个检查点停下，走 stopWith('user_stop')，已采数据照常保存。
+const stopRequested = () => !!(control && control.stopFlag && control.stopFlag.stopped);
 
 // ---- 启动检查：out/ 里若混进 accounts.txt，警告并忽略（只认 collector 根目录的）----
 if (fs.existsSync(path.join(config.outDir, 'accounts.txt'))) {
@@ -857,8 +1028,20 @@ if (autoCandidates) {
 }
 const profileDir = selected ? config.profileDirFor(selected.username) : config.profileDir;
 
+// 累积存储在开跑前先读进来：话题页链接要靠它跳过已采帖子；本轮成果在
+// finish 里并回去。文件坏了就警告一行按空库开始，绝不因此跑不了。
+const storeLoad = storeMod.loadStore(config.storeFile);
+if (storeLoad.corrupt) {
+console.log('警告：累积存储 data/store.json 已损坏、读不出来，本次按空库开始（以前攒的名单这次读不到）。');
+}
+const storeState = storeLoad.store;
+const checkedPosts = []; // 本轮打开处理过的帖子，收尾并入累积存储
+// 输出文件名的关键词标记：多词用下划线拼，清掉文件名不友好的字符
+const fileTag = args.keywords.map((k) => k.replace(/[^A-Za-z0-9_-]+/g, '-')).join('_').slice(0, 60) || args.keyword;
+
 const output = {
 keyword: args.keyword,
+keywords: args.keywords,
 collectedAt: new Date().toISOString(),
 source: 'local-collector',
 items: [],
@@ -869,6 +1052,7 @@ postsFound: 0,
 postsCollected: 0,
 postsSkippedOld: 0,
 postsSkippedNonMerchant: 0,
+postsSkippedStored: 0,
 commentsCollected: 0,
 commentsSeen: 0,
 commentsKeptIntent: 0,
@@ -877,7 +1061,7 @@ stoppedLabel: '',
 },
 };
 const finish = (code) => {
-const saved = saveOutput(output);
+const saved = saveOutput(output, { storeState: storeState, checkedPosts: checkedPosts, fileTag: fileTag });
 const file = saved.file;
 const s = output.stats;
 console.log('汇总：帖子采集 ' + s.postsCollected + ' 条，跳过旧帖 ' + (s.postsSkippedOld || 0) +
@@ -890,6 +1074,10 @@ console.log('运行状态：' + JSON.stringify({ stopped: null, label: '采集�
 }
 console.log('结果已保存：' + file);
 console.log('客户名单：共 ' + saved.leadsCount + ' 条 → ' + saved.leadsFile + '（只有两列：用户链接、评论内容）');
+if (saved.allFile) {
+console.log('累积存储：本轮新增帖子 ' + saved.addedPosts + ' 条、新增名单 ' + saved.addedLeads + ' 条。');
+console.log('累计名单：共 ' + saved.allCount + ' 人 → ' + saved.allFile + '（历次累积，只有两列：用户链接、评论内容）');
+}
 return code;
 };
 const stopWith = (reason) => {
@@ -1134,23 +1322,42 @@ await exportSessionState(context, username);
 console.log('没识别出用户名，本次跳过会话导出（不影响采集）。');
 }
 
-// ---- 话题页搜帖 ----
-const tagUrl = config.tagsUrl(args.keyword);
-console.log('正在打开话题页：#' + args.keyword);
+// ---- 逐关键词搜帖采集 ----
+// 一个浏览器会话（只登录一次）里按顺序把所有关键词跑完：每个关键词各开
+// 自己的话题页、各自计一份小结，帖子条目打上 keyword 标记，结果合并成
+// 一份输出（名单 CSV 跨关键词合并去重，见 finish/saveOutput）。
+const runCheckedUrls = new Set(); // 本轮已处理过的帖子链接（跨关键词去重，不重复打开）；checkedPosts 在函数开头已声明
+output.stats.byKeyword = {};
+
+for (let ki = 0; ki < args.keywords.length; ki++) {
+const kw = args.keywords[ki];
+if (stopRequested()) { stopWith('user_stop'); break; }
+const kwStats = {
+postsFound: 0, postsCollected: 0, postsSkippedOld: 0,
+postsSkippedNonMerchant: 0, postsSkippedStored: 0,
+commentsSeen: 0, commentsKeptIntent: 0,
+};
+output.stats.byKeyword[kw] = kwStats;
+console.log('');
+console.log('===== 关键词 ' + (ki + 1) + '/' + args.keywords.length + '：#' + kw + ' =====');
+
+const tagUrl = config.tagsUrl(kw);
+console.log('正在打开话题页：#' + kw);
 try {
-await page.goto(tagUrl, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs});
+await page.goto(tagUrl, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs });
 } catch (e) {
-console.log('打开话题页失败：' + (e && e.message? e.message.split('\n')[0]: e));
+console.log('打开话题页失败：' + (e && e.message ? e.message.split('\n')[0] : e));
 stopWith('network_error');
-return finish(0);
+break;
 }
 await humanPause();
 
 let stop = await checkStop(page);
-if (stop) { stopWith(stop.reason); return finish(0);}
+if (stop) { stopWith(stop.reason); break; }
 
 const linkMap = new Map();
 for (let round = 0; round < config.limits.scrollRoundsMax && linkMap.size < args.posts; round++) {
+if (stopRequested()) { stopWith('user_stop'); break; }
 let hrefs = [];
 try {
 hrefs = await page.evaluate(() =>
@@ -1160,22 +1367,51 @@ for (const l of extract.extractPostLinksFromHrefs(hrefs)) {
 if (!linkMap.has(l.shortCode)) linkMap.set(l.shortCode, l);
 }
 if (linkMap.size >= args.posts) break;
-try { await page.mouse.wheel(0, 1600);} catch (_) { /* 忽略 */}
+try { await page.mouse.wheel(0, 1600); } catch (_) { /* 忽略 */}
 await smallPause();
 stop = await checkStop(page);
-if (stop) { stopWith(stop.reason); break;}
+if (stop) { stopWith(stop.reason); break; }
 }
+if (output.stats.stopped) break;
 
-const links = Array.from(linkMap.values()).slice(0, args.posts);
-output.stats.postsFound = links.length;
+// 累积存储跳过：链接先查 data/store.json，以前采过的帖子整帖跳过
+// （--rescan 时不查，全部重采）；本轮内已处理过的链接同样跳过。
+let foundLinks = Array.from(linkMap.values());
+let skippedStored = 0;
+if (!args.rescan) {
+const freshLinks = [];
+for (const l of foundLinks) {
+if (storeMod.hasPost(storeState, l.url) || runCheckedUrls.has(l.url)) skippedStored++;
+else freshLinks.push(l);
+}
+foundLinks = freshLinks;
+if (skippedStored > 0) {
+console.log('跳过已采帖子 ' + skippedStored + ' 条（以前或本轮已采过；加 --rescan 可重采）');
+}
+} else if (runCheckedUrls.size > 0) {
+const freshLinks = [];
+for (const l of foundLinks) {
+if (runCheckedUrls.has(l.url)) skippedStored++;
+else freshLinks.push(l);
+}
+foundLinks = freshLinks;
+if (skippedStored > 0) console.log('跳过本轮已采帖子 ' + skippedStored + ' 条');
+}
+kwStats.postsSkippedStored = skippedStored;
+output.stats.postsSkippedStored = (output.stats.postsSkippedStored || 0) + skippedStored;
+
+const links = foundLinks.slice(0, args.posts);
+kwStats.postsFound = links.length;
+output.stats.postsFound += links.length;
 console.log('话题页共找到帖子链接 ' + links.length + ' 条，开始逐条采集…');
-if (output.stats.stopped) return finish(0);
 
 // ---- 逐帖采集 ----
 for (let i = 0; i < links.length; i++) {
+if (stopRequested()) { stopWith('user_stop'); break; }
 const link = links[i];
+runCheckedUrls.add(link.url);
 try {
-await page.goto(link.url, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs});
+await page.goto(link.url, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs });
 } catch (e) {
 console.log('帖子 ' + (i + 1) + '/' + links.length + ' 打开失败，跳过：' + link.url);
 await humanPause();
@@ -1184,10 +1420,11 @@ continue;
 await humanPause();
 
 stop = await checkStop(page);
-if (stop) { stopWith(stop.reason); break;}
+if (stop) { stopWith(stop.reason); break; }
 
 const data = await extractPostData(page, link);
 const post = data.post;
+post.keyword = kw;
 
 // 筛选一：新鲜度。发布时间已知且超过 --max-age-days 的，在读评论之前
 // 整帖跳过（不进结果、省时间）；发布时间未知的照常采（已标 unknown）。
@@ -1196,6 +1433,8 @@ timestamp: post.timestamp, now: Date.now(), maxAgeDays: args.maxAgeDays,
 });
 if (ageDecision.action === 'skip') {
 output.stats.postsSkippedOld++;
+kwStats.postsSkippedOld++;
+checkedPosts.push({ postUrl: link.url, keyword: kw, checkedAt: new Date().toISOString() });
 console.log('跳过旧帖 ' + link.shortCode + '：发布于 ' +
 String(post.timestamp).slice(0, 10) + '（超过 ' + args.maxAgeDays + ' 天）');
 await humanPause();
@@ -1212,6 +1451,7 @@ console.log('帖子 ' + link.shortCode + ' 发布时间未知，照常采集。'
 const mSignals = filters.merchantSignalsOf(post.caption);
 if (args.merchantFilter && mSignals.length === 0) {
 output.stats.postsSkippedNonMerchant++;
+kwStats.postsSkippedNonMerchant++;
 console.log('跳过非商家帖 @' + (post.ownerUsername || '未知') + '（文案无售卖信号）');
 await humanPause();
 continue;
@@ -1233,10 +1473,14 @@ const comments = filtered.kept;
 post.latestComments = comments;
 output.items.push(post);
 for (const c of comments) output.items.push(c);
+checkedPosts.push({ postUrl: link.url, keyword: kw, checkedAt: new Date().toISOString() });
 output.stats.postsCollected++;
+kwStats.postsCollected++;
 output.stats.commentsCollected += comments.length;
 output.stats.commentsSeen += filtered.seen;
+kwStats.commentsSeen += filtered.seen;
 output.stats.commentsKeptIntent += filtered.intentCount;
+kwStats.commentsKeptIntent += filtered.intentCount;
 if (args.keepAll) {
 console.log('已采集帖子 ' + (i + 1) + '/' + links.length + '：@' +
 (post.ownerUsername || '未知') + '，评论共 ' + filtered.seen +
@@ -1247,6 +1491,12 @@ console.log('已采集帖子 ' + (i + 1) + '/' + links.length + '：@' +
 ' 条，意向 ' + filtered.intentCount + ' 条');
 }
 await humanPause();
+}
+
+console.log('关键词 #' + kw + ' 小结：采集帖子 ' + kwStats.postsCollected +
+' 条，跳过已采 ' + kwStats.postsSkippedStored + ' 条，跳过旧帖 ' + kwStats.postsSkippedOld +
+' 条；评论共看到 ' + kwStats.commentsSeen + ' 条，意向保留 ' + kwStats.commentsKeptIntent + ' 条。');
+if (output.stats.stopped) break;
 }
 
 return finish(0);
@@ -1265,4 +1515,4 @@ process.exit(1);
 });
 }
 
-module.exports = { parseArgs, cleanKeyword, printUsage, runCheckCookies};
+module.exports = { parseArgs, cleanKeyword, normalizeKeywords, printUsage, runCheckCookies, run, runCollect, runCollectFromArgs, argsFromOptions, saveOutput };

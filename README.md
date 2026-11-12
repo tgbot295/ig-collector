@@ -179,6 +179,10 @@ node collector.js --keyword "down jacket" --posts 10 --comments 30
 node collector.js --keyword downjacket --max-age-days 90     # 只采最近 90 天的帖子
 node collector.js --keyword downjacket --keep-all            # 关掉意向预筛，评论全采
 node collector.js --keyword downjacket --merchant-filter     # 打开商家筛选（默认关），只采文案带售卖信号的帖
+node collector.js --keyword downjacket,pufferjacket          # 多关键词：一轮按顺序跑多个词（也可重复写 --keyword，最多 10 个）
+node collector.js --keyword downjacket --rescan              # 重采已采过的帖子（默认会跳过，见下面累积存储）
+node collector.js --export-xlsx                              # 只把累积名单导出成 Excel（out/leads-all.xlsx），不采集
+node collector.js --gui                                      # 打开图形控制台（网页里点按钮采集）
 node collector.js --keyword luxurybags --manual               # 强制手动登录
 node collector.js --help                                      # 看用法
 ```
@@ -221,13 +225,82 @@ node collector.js --help                                      # 看用法
      线索的，预筛后保留下来的正好全是意向评论，导入分析的口径不变，
      只是结果文件更小、更聚焦。
 
+## 图形控制台（--gui）
+
+不想敲命令就用这个（等价于图形窗口版工具的用法）：
+
+```bash
+node collector.js --gui
+```
+
+- 打开 http://127.0.0.1:3212 （**只绑本机回环地址**，局域网/外网都访问
+  不到），一个页面全包：关键词输入框（每行一个，预填 downjacket）、
+  每词帖子数、「开始采集」/「停止」按钮、实时滚动的运行日志、三张
+  统计卡（累计帖子 / 累计评论线索 / 去重用户，读累积存储）、
+  「导出Excel」「导出CSV」两个按钮（导的都是累积名单）。
+- **点「开始采集」之前不会打开任何浏览器**；点下后走的和命令行完全是
+  同一条流水线、同样的自动模式挑登录来源（cookies 文件夹 /
+  accounts.txt），黑名单、限速、停止条件一条不少。同一时间只跑一轮，
+  已经在跑时再点会提示先等它跑完；「停止」是让它处理完当前帖子就停，
+  已采数据照常保存。
+- 一键启动文件（`Start-Windows.bat` / `Start-Mac.command`）在放好登录
+  文件时默认就开这个控制台。
+
+## 多关键词一轮跑
+
+`--keyword` 可以重复写，也可以用英文逗号分隔，`--keywords` 是同义
+写法（一轮最多 10 个）：
+
+```bash
+node collector.js --keyword downjacket --keyword pufferjacket
+node collector.js --keyword downjacket,pufferjacket,wintercoat
+```
+
+一个浏览器会话里**只登录一次**，按顺序逐个关键词跑：每个词各开话题
+页、各报一份小结（采集/跳过/意向数），帖子条目带 `keyword` 字段标明
+出自哪个词，`stats.byKeyword` 里有逐词统计。最后的名单 CSV 是**全轮
+合并**的：同一人在多个词下评了同一句话，只出一条。
+
+## 累积存储（data/store.json）：越跑越全，不重复采
+
+历次运行的成果攒在 `data/store.json`（本地文件，权限 0600，已被
+.gitignore 排除），内容只有两样：
+
+- **帖子**：`{ 帖子链接, 关键词, 首次检查时间 }` —— 本轮实际打开处理
+  过的帖子（采纳的 + 因太旧跳过的）都会记下。
+- **名单**：按「用户名 + 评论原文」去重的意向线索
+  `{ 用户名, 评论, 首次出现时间, keywords: [出现过的关键词…] }`。
+
+用法上的变化：
+
+- **默认跳过已采帖子**：话题页收集到链接后，先查累积存储，以前采过
+  的整帖跳过，每个关键词会打一行「跳过已采帖子 N 条」。话题页翻来
+  覆去总是那批热门帖时，新一轮会自动往没采过的帖子走，不再原地重复。
+  想强制重采就加 **`--rescan`**。
+- **每轮结束多出一份累计名单**：`out/leads-all-<时间>.csv` 是到目前
+  为止**全部**累积线索的两列 CSV（口径和本轮名单一致），控制台会打
+  一行「累计名单：共 M 人」。
+- 文件损坏/读不出时只警告一行、按空库重新开始，不会让工具跑不了；
+  想从零开始，停掉脚本后删掉 `data/store.json` 即可。
+
+## 一键导出 Excel
+
+累积名单除了 CSV 还能直接出 Excel（两列，工作表名「客户名单」）：
+
+- 命令行：`node collector.js --export-xlsx` 写到 `out/leads-all.xlsx`，
+  或 `--export-xlsx <路径>` 指定位置。不采集、不开浏览器。
+- 图形控制台里点「导出Excel」按钮，效果一样（浏览器直接下载）。
+- 实现是工具自己按 xlsx 格式手写的（只用 Node 标准库，没有新依赖）；
+  单元格都是纯文本，以 `=` 开头的评论也不会被 Excel 当公式。
+
 ## 最终结果
 
-每次运行在 `out/` 里生成两个同名对应的文件：
+每次运行在 `out/` 里生成三个同名对应的文件：
 
 ```
-out/leads-<关键词>-<时间>.csv      ← 给人看的最终名单
-out/collect-<关键词>-<时间>.json   ← 完整记录，给分析工具用
+out/leads-<关键词>-<时间>.csv      ← 本轮名单，给人看的最终名单
+out/collect-<关键词>-<时间>.json   ← 本轮完整记录，给分析工具用
+out/leads-all-<时间>.csv           ← 累计名单：历次累积的全部线索
 ```
 
 - **`leads-*.csv` 是最终交付物，只有两列：`用户链接,评论内容`** —— 每行一个
@@ -236,10 +309,15 @@ out/collect-<关键词>-<时间>.json   ← 完整记录，给分析工具用
   意向的），商家自己评自己帖的不算，同一人同一句评论过多个帖子只算一条。
   带 UTF-8 BOM，Windows 上用 Excel 双击打开不乱码。哪怕这次 0 条，也会
   生成只有表头的文件，控制台会写明「客户名单：共 N 条」。
-- `collect-*.json` 是完整记录：结构是 `{ keyword, collectedAt,
-  source: "local-collector", items, stats }`，`items` 里是帖子条目和评论
+- `collect-*.json` 是完整记录：结构是 `{ keyword, keywords,
+  collectedAt, source: "local-collector", items, stats }`（`keywords`
+  是本轮全部关键词，帖子条目上的 `keyword` 标明它出自哪个词；
+  `stats.byKeyword` 有逐词统计），`items` 里是帖子条目和评论
   条目，形状与本地版 IG 工具的导入格式一致，直接在该工具的「任务输入」页
   导入这个 JSON 即可继续分析和出表。
+- `leads-all-*.csv` 是累计名单：本轮成果先并入累积存储
+  （`data/store.json`），再把存储里的全部线索导出成同样的两列 CSV，
+  见上面「累积存储」一节。要 Excel 版用 `--export-xlsx` 或控制台按钮。
 
 结果文件里只有公开采集数据和登录账号的用户名，**不含任何密码/密钥**。
 
@@ -264,7 +342,9 @@ npm test
 纯本地单测（黑名单、停止页检测、解析函数、accounts.txt 解析与秘密卫生、
 TOTP 的 RFC 6238 官方测试向量、会话文件转换与 0600 落盘往返、
 cookies 文件夹自动扫描与秘密卫生、浏览器启动顺序与回退策略、
-三道采集筛选的新鲜度判定 / 商家信号 / 意向分类），
+三道采集筛选的新鲜度判定 / 商家信号 / 意向分类、多关键词参数解析、
+累积存储的两轮合并去重与损坏容错、手写 xlsx 的独立解包验证、
+图形控制台的接口与假 runner 注入），
 不联网、不登录、不开真浏览器。
 
 ## 一键启动（不用敲命令）
@@ -276,10 +356,12 @@ cookies 文件夹自动扫描与秘密卫生、浏览器启动顺序与回退策
 - Mac：`Start-Mac.command`
 
 第一次双击会自动装依赖（只需一次；浏览器用本机现成的 Chrome / Edge，
-不另外下载，两个都没装时会先提醒你装 Chrome）。之后每次会问一句关键词，
-直接回车就是 `downjacket`，想搜别的就输别的（连着的词，如 `downjacket`、
-`handbag`）。启动文件只是帮你敲一句命令，真正挑文件、验登录的是脚本的
-自动模式（见下一节）。结果在 `out/` 文件夹里。
+不另外下载，两个都没装时会先提醒你装 Chrome）。放好 cookie 文件后双击，
+会自动打开**图形控制台**页面（http://127.0.0.1:3212，只在本机）：
+关键词在网页里填（一行一个，可填多个）、点「开始采集」即可，
+日志、累计统计、导出都在页面上；用完关掉那个终端/命令窗口就停。
+没放任何登录文件时双击只会提示先放文件，不会进控制台空转。
+真正挑文件、验登录的是脚本的自动模式（见下一节）。结果在 `out/` 文件夹里。
 
 注意：`cookies/` 文件夹里除说明文件外的所有文件都已被 .gitignore 排除，
 不会被 git 提交；但文件就是账号钥匙，也别手动发给任何人。

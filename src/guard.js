@@ -70,6 +70,7 @@ const REASON_LABELS = {
   network_error: '网络打开页面失败',
   browser_launch_failed: '浏览器启动失败',
   playwright_missing: '未安装 Playwright 或浏览器内核',
+  user_stop: '用户手动停止（控制台/终端要求停）',
 };
 
 function reasonLabel(reason) {
