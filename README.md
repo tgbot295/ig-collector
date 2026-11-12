@@ -97,9 +97,13 @@ node collector.js --keyword downjacket --manual
    就直接是登录态，不用密码、不用 2FA。脚本会先核验登录的是哪个号，
    命中主号黑名单照样立即中止。
 
-2. **cookie 的 JSON（关键就一个 sessionid）**
+2. **cookie 文件（关键就一个 sessionid）**
    用浏览器 cookie 导出扩展之类拿到的 JSON 也行，裸数组或
-   `{ "cookies": [...] }` 两种形状都认：
+   `{ "cookies": [...] }` 两种形状都认。另外这些卖家常见格式也都认：
+   扁平字典 JSON（`{"sessionid": "...", ...}`）、整份被 Base64 包了一层
+   的、Netscape 格式的 cookies.txt（curl / 扩展导出的经典格式）、
+   `name=value; ...` 的 Cookie 头文本。文件编码是 UTF-16（记事本另存
+   的常见结果）也能读。命令是：
 
    ```bash
    node collector.js --keyword downjacket --import-cookies 你的cookie文件.json
@@ -244,3 +248,19 @@ cookies 文件夹自动扫描与秘密卫生、浏览器启动顺序与回退策
 优先于自动模式：`--account`、`--manual`、`--import-session`、
 `--import-cookies` 给了哪个就走哪个。扫描目录可用 `--cookies-dir <目录>`
 更改（默认 `./cookies`）。
+
+## 体检 cookie 文件（--check-cookies）
+
+文件被自动模式跳过、又不知道为什么时，不用把文件发给任何人，先跑体检：
+
+```bash
+node collector.js --check-cookies
+```
+
+它扫描 `cookies/` 文件夹（可用 `--cookies-dir <目录>` 换）和根目录的
+`cookies.txt` / `cookies.json`，逐个文件只报告：文件名、认出的格式
+（json数组 / json对象 / base64包装 / netscape / cookie头 / 未知）、
+文件里 cookie 的**名字**清单、有没有 `sessionid`、结论（可用 / 不可用
++ 原因，如“空文件”“像Netscape格式但没有sessionid”）。**绝不打印任何
+cookie 的值**，所以这份输出可以放心截图/贴出来排查。体检完就退出
+（退出码 0），不登录、不采集。

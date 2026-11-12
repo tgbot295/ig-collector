@@ -1,0 +1,6 @@
+# Start-Windows.bat 是 GBK 编码 + CRLF（中文 Windows 的 cmd 按 GBK 解析批处理，
+# UTF-8 会被拆成乱码命令）。禁止 git 对它做行尾转换或当成普通文本处理，
+# 否则克隆到 Windows 后又会坏。改这个文件时保持 GBK 编码另存。
+Start-Windows.bat -text
+# Mac 启动脚本必须保持 LF 行尾（CRLF 会让 bash 报错）。
+Start-Mac.command text eol=lf

@@ -64,7 +64,7 @@ try {
 
   ok('load: unparseable reported by filename + reason category only', () => {
     assert.deepStrictEqual(loaded.unparseable.map((u) => u.file), ['b.txt', 'c.txt']);
-    assert.strictEqual(loaded.unparseable.find((u) => u.file === 'b.txt').reason, '读不出');
+    assert.strictEqual(loaded.unparseable.find((u) => u.file === 'b.txt').reason, '读不出（格式不认）');
     assert.strictEqual(loaded.unparseable.find((u) => u.file === 'c.txt').reason, '没有sessionid');
   });
 
@@ -87,6 +87,58 @@ try {
   });
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ---- 第二组：新格式 + 新原因类别（UTF-16 文件、Cookie 头、空文件、Netscape 缺 sessionid）----
+const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'ig-cookiesdir-test2-'));
+try {
+  // UTF-16LE（带 BOM）存的 JSON —— 记事本另存的典型产物，按字节读才能解
+  const utf16Json = JSON.stringify([
+    { name: 'sessionid', value: FAKE_ID_1, domain: '.instagram.com', path: '/' },
+    { name: 'csrftoken', value: FAKE_CSRF, domain: '.instagram.com' },
+  ]);
+  fs.writeFileSync(path.join(dir2, 'utf16.txt'),
+    Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from(utf16Json, 'utf16le')]));
+  // Cookie 头单行
+  fs.writeFileSync(path.join(dir2, 'header.txt'),
+    'sessionid=' + FAKE_ID_1 + '; csrftoken=' + FAKE_CSRF + '; ds_user_id=1234567890', 'utf8');
+  // 空文件
+  fs.writeFileSync(path.join(dir2, 'empty.txt'), '', 'utf8');
+  // Netscape 格式但只有 csrftoken / datr，没有 sessionid
+  const nsLine = (name, value) => ['.instagram.com', 'TRUE', '/', 'TRUE', '1893456000', name, value].join('\t');
+  fs.writeFileSync(path.join(dir2, 'netscape-nosid.txt'),
+    '# Netscape HTTP Cookie File\n' + nsLine('csrftoken', FAKE_CSRF) + '\n' + nsLine('datr', 'fake-datr') + '\n', 'utf8');
+
+  let loaded2 = null;
+  ok('load2: utf16 + cookie-header files are parseable', () => {
+    loaded2 = cookiesDir.loadCandidates(dir2);
+    assert.deepStrictEqual(loaded2.parseable.map((c) => c.file), ['header.txt', 'utf16.txt']);
+  });
+
+  ok('load2: reasons are granular — 空文件 / 像Netscape格式但没有sessionid', () => {
+    assert.deepStrictEqual(loaded2.unparseable.map((u) => u.file), ['empty.txt', 'netscape-nosid.txt']);
+    assert.strictEqual(loaded2.unparseable.find((u) => u.file === 'empty.txt').reason, '空文件');
+    assert.strictEqual(loaded2.unparseable.find((u) => u.file === 'netscape-nosid.txt').reason,
+      '像Netscape格式但没有sessionid');
+  });
+
+  ok('diagnose: values-free report with format label and names only', () => {
+    const dGood = cookiesDir.diagnoseFile(path.join(dir2, 'utf16.txt'));
+    assert.strictEqual(dGood.ok, true);
+    assert.strictEqual(dGood.format, 'json数组');
+    assert.deepStrictEqual(dGood.cookieNames, ['csrftoken', 'sessionid']);
+    const dNs = cookiesDir.diagnoseFile(path.join(dir2, 'netscape-nosid.txt'));
+    assert.strictEqual(dNs.ok, false);
+    assert.strictEqual(dNs.format, 'netscape');
+    assert.strictEqual(dNs.hasSessionid, false);
+    assert.strictEqual(dNs.reason, '像Netscape格式但没有sessionid');
+    const blob = JSON.stringify([dGood, dNs]);
+    assert.ok(!blob.includes(FAKE_ID_1), 'sessionid value leaked into diagnose');
+    assert.ok(!blob.includes(FAKE_CSRF), 'csrftoken value leaked into diagnose');
+    assert.ok(!blob.includes('fake-datr'), 'datr value leaked into diagnose');
+  });
+} finally {
+  fs.rmSync(dir2, { recursive: true, force: true });
 }
 
 console.log('cookies 文件夹单测全部通过：' + passed + ' 项');

@@ -2,8 +2,17 @@
 // 会话文件模块（纯函数为主，可单测）：IG 没有官方的 .session 文件，
 // 能“拿文件直登”的等价物是这三种，本模块负责它们之间的转换与落盘：
 //   1) Playwright storageState 单文件（本工具导出为 sessions/<用户名>.storage.json）
-//   2) cookie 的 JSON（浏览器扩展导出的裸数组，或 {cookies:[...]} 形状）
+//   2) cookie 的各种导出文本（浏览器扩展 JSON / Netscape cookies.txt / Cookie 头等）
 //   3) browser-profile/ 浏览器配置目录（在 collector.js / config.js 那边，不在本模块）
+//
+// 认得的文本格式（parseSessionText / parseSessionBuffer）：
+//   - JSON 裸数组、{cookies:[...]} 对象、storageState
+//   - JSON 扁平字典对象 {名字: 值, ...}（含 sessionid 才算可用）
+//   - 带首行标签行的上述 JSON（自动剥杂质）
+//   - 整份 JSON 被 Base64 包装（可折行/带空格/base64url 变体）
+//   - Netscape HTTP Cookie File（经典 cookies.txt，7 段 TAB 分隔，认 #HttpOnly_ 行）
+//   - Cookie 头风格 name=value; name2=value2（单行/多行，可带 Cookie: 前缀）
+// 文件编码：UTF-8（含 BOM）、UTF-16LE / UTF-16BE（带 BOM，或无 BOM 靠 NUL 分布猜）。
 //
 // 安全红线（写死）：
 // - 会话/cookie 文件等于账号钥匙（等同 TG 的 .session），谁持有谁就能登号。
@@ -16,6 +25,17 @@ const path = require('path');
 // IG 登录关键 cookie：sessionid 是登录态本身，缺了它等于没登录。
 const LOGIN_CRITICAL_COOKIES = ['sessionid', 'csrftoken', 'ds_user_id'];
 const IG_DOMAIN = '.instagram.com';
+
+// 检测到的格式 → --check-cookies 里显示的名字
+const FORMAT_LABELS = {
+  'json-array': 'json数组',
+  'json-object': 'json对象',
+  'json-dict': 'json对象',
+  'base64': 'base64包装',
+  'netscape': 'netscape',
+  'cookie-header': 'cookie头',
+  'unknown': '未知',
+};
 
 function isInstagramDomain(domain) {
   if (domain === undefined || domain === null || domain === '') return true; // 没写域名按 IG 处理（导出文件常省略）
@@ -74,6 +94,36 @@ function normalizeCookie(raw) {
   return cookie;
 }
 
+// 原始 cookie 数组 → storageState（不抛错版）：
+// 返回 { cookies, origins, names }；缺 sessionid 时 cookies 仍给出，
+// 由调用方决定报错口径。names 是转换前全部 cookie 的名字（已去重），
+// 只用于体检报告——名字可以报，值永远不报。
+function convertRawCookies(rawCookies, rawOrigins) {
+  const names = [];
+  const seen = new Set();
+  const byKey = new Map();
+  for (const raw of rawCookies) {
+    if (raw && typeof raw === 'object' && raw.name && !seen.has(String(raw.name))) {
+      seen.add(String(raw.name));
+      names.push(String(raw.name));
+    }
+    const c = normalizeCookie(raw);
+    if (!c) continue;
+    byKey.set(c.name + '|' + c.domain + '|' + c.path, c); // 后出现的覆盖先出现的
+  }
+  const origins = (Array.isArray(rawOrigins) ? rawOrigins : []).filter((o) => {
+    if (!o || typeof o !== 'object') return false;
+    try { return isInstagramDomain(new URL(String(o.origin || '')).hostname); } catch (_) { return false; }
+  });
+  return { cookies: Array.from(byKey.values()), origins: origins, names: names };
+}
+
+function missingSessionidError() {
+  const err = new Error('会话文件里缺少关键 cookie：sessionid（没有它等于没有登录态）。请确认导出的是已登录 Instagram 的会话/cookie。');
+  err.code = 'missing_sessionid';
+  return err;
+}
+
 // 任意输入（裸 cookie 数组 / {cookies:[...]} / storageState）→ Playwright storageState。
 // 强制要求 sessionid 存在；缺失时抛错，错误只写 cookie 名字，绝不带任何值。
 function toStorageState(input) {
@@ -86,23 +136,13 @@ function toStorageState(input) {
     if (Array.isArray(input.origins)) rawOrigins = input.origins;
   }
   if (!rawCookies) {
-    throw new Error('会话文件格式不对：没有找到 cookies 数组。请确认导出的文件是 cookie JSON 或本工具的 .storage.json。');
+    const err = new Error('会话文件格式不对：没有找到 cookies 数组。请确认导出的文件是 cookie JSON 或本工具的 .storage.json。');
+    err.code = 'no_cookies_array';
+    throw err;
   }
-  const byKey = new Map();
-  for (const raw of rawCookies) {
-    const c = normalizeCookie(raw);
-    if (!c) continue;
-    byKey.set(c.name + '|' + c.domain + '|' + c.path, c); // 后出现的覆盖先出现的
-  }
-  const cookies = Array.from(byKey.values());
-  if (!cookies.some((c) => c.name === 'sessionid')) {
-    throw new Error('会话文件里缺少关键 cookie：sessionid（没有它等于没有登录态）。请确认导出的是已登录 Instagram 的会话/cookie。');
-  }
-  const origins = rawOrigins.filter((o) => {
-    if (!o || typeof o !== 'object') return false;
-    try { return isInstagramDomain(new URL(String(o.origin || '')).hostname); } catch (_) { return false; }
-  });
-  return { cookies: cookies, origins: origins };
+  const conv = convertRawCookies(rawCookies, rawOrigins);
+  if (!conv.cookies.some((c) => c.name === 'sessionid')) throw missingSessionidError();
+  return { cookies: conv.cookies, origins: conv.origins };
 }
 
 // 只读摘要：可以安全打印/写日志 —— 只有 cookie 名字和数量，绝不含值。
@@ -118,6 +158,48 @@ function summarizeState(state) {
 
 function hasCookie(state, name) {
   return !!(state && Array.isArray(state.cookies) && state.cookies.some((c) => c.name === name));
+}
+
+// ---------------------------------------------------------------------------
+// 文件编码层：Windows 记事本另存的文件可能是 UTF-8 BOM / UTF-16LE / UTF-16BE，
+// 直接按 UTF-8 读会读成乱码或带 NUL 的废文本，任何格式都解不出。
+// 这里先把字节解成文本：认 BOM；无 BOM 时靠 NUL 字节分布猜 UTF-16
+// （纯 UTF-8 文本几乎不含 NUL，所以误判风险低）。
+// ---------------------------------------------------------------------------
+function decodeBufferText(buf) {
+  if (!buf || buf.length === 0) return { text: '', encoding: 'empty' };
+  if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) {
+    return { text: buf.slice(3).toString('utf8'), encoding: 'utf8-bom' };
+  }
+  if (buf.length >= 2 && buf[0] === 0xFF && buf[1] === 0xFE) {
+    return { text: buf.slice(2).toString('utf16le'), encoding: 'utf16le' };
+  }
+  if (buf.length >= 2 && buf[0] === 0xFE && buf[1] === 0xFF) {
+    const body = buf.slice(2);
+    const swapped = Buffer.allocUnsafe(body.length);
+    for (let i = 0; i + 1 < body.length; i += 2) { swapped[i] = body[i + 1]; swapped[i + 1] = body[i]; }
+    if (body.length % 2 === 1) swapped[body.length - 1] = body[body.length - 1];
+    return { text: swapped.toString('utf16le'), encoding: 'utf16be' };
+  }
+  if (buf.length >= 4 && buf.length % 2 === 0) {
+    let evenZero = 0;
+    let oddZero = 0;
+    const pairs = buf.length / 2;
+    for (let i = 0; i < buf.length; i += 2) {
+      if (buf[i] === 0) evenZero++;
+      if (buf[i + 1] === 0) oddZero++;
+    }
+    // UTF-16LE 的 ASCII 字符高字节在奇数位、是 0；UTF-8 文本两边都几乎不会有 0
+    if (oddZero / pairs >= 0.25 && evenZero / pairs < 0.05) {
+      return { text: buf.toString('utf16le'), encoding: 'utf16le-guess' };
+    }
+    if (evenZero / pairs >= 0.25 && oddZero / pairs < 0.05) {
+      const swapped = Buffer.allocUnsafe(buf.length);
+      for (let i = 0; i + 1 < buf.length; i += 2) { swapped[i] = buf[i + 1]; swapped[i + 1] = buf[i]; }
+      return { text: swapped.toString('utf16le'), encoding: 'utf16be-guess' };
+    }
+  }
+  return { text: buf.toString('utf8'), encoding: 'utf8' };
 }
 
 // 纯文本解析（第 1、2 步）：先整段 JSON.parse；失败时做方括号截取——
@@ -178,36 +260,214 @@ function base64Candidates(raw) {
   return Array.from(new Set(cands)).filter(isBase64Shaped);
 }
 
-// 从文件内容文本解析会话（--import-session 与 --import-cookies 共用入口）。
-// 依次尝试：1) 纯 JSON；2) 带标题行的 JSON（方括号截取）；
-// 3) Base64 包装（整份 cookie JSON 被 Base64 编码，可能折行/带空格/URL 安全变体，
-//    解码后回到 1–2 步，解码文本里带杂质也能靠方括号截取救回来）。
-function parseSessionText(text) {
-  const raw = String(text || '');
-  let parsed = tryParseJsonText(raw);
-  if (parsed === undefined) {
-    for (const cand of base64Candidates(raw)) {
-      let decoded = '';
-      try { decoded = decodeBase64(cand); } catch (_) { continue; }
-      if (!decoded) continue;
-      parsed = tryParseJsonText(decoded);
-      if (parsed !== undefined) break;
+// ---------------------------------------------------------------------------
+// Netscape HTTP Cookie File（经典 cookies.txt）：每行 7 段 TAB 分隔：
+//   domain  flag  path  secure  expiration  name  value
+// 以 # 开头的是注释行，唯独 "#HttpOnly_" 前缀的行是真 cookie（去掉前缀、
+// 标记 httpOnly）。curl / yt-dlp / 各种浏览器扩展导出的就是这种。
+// ---------------------------------------------------------------------------
+function parseNetscapeLine(line) {
+  let httpOnly = false;
+  let s = line;
+  if (s.startsWith('#HttpOnly_')) { httpOnly = true; s = s.slice('#HttpOnly_'.length); }
+  else if (s.startsWith('#')) return null;
+  const fields = s.split('\t');
+  if (fields.length < 7) return null;
+  const name = String(fields[5] || '').trim();
+  if (!name || /[\s=;]/.test(name)) return null;
+  return {
+    domain: String(fields[0] || '').trim(),
+    path: String(fields[2] || '').trim() || '/',
+    secure: /^true$/i.test(String(fields[3] || '').trim()),
+    expires: Number(fields[4]) || -1,
+    name: name,
+    // value 是最后一段；万一值里混了 TAB，把第 7 段起拼回去
+    value: fields.slice(6).join('\t'),
+    httpOnly: httpOnly,
+  };
+}
+
+function tryParseNetscape(text) {
+  const lines = String(text).split(/\r?\n/);
+  const cookies = [];
+  for (const line of lines) {
+    if (!line || !line.trim()) continue;
+    const c = parseNetscapeLine(line);
+    if (c) cookies.push(c);
+  }
+  return cookies.length > 0 ? cookies : null;
+}
+
+// ---------------------------------------------------------------------------
+// Cookie 头风格：name=value; name2=value2（单行或多行，每行可带 Cookie: 前缀）。
+// 判定从严：文本里不能有 JSON 的 { } [ ]；按行、按 ; 切开后，每段都必须
+// 是合法的 name=value；至少 2 对，或者唯一 1 对就是 sessionid，才认定。
+// ---------------------------------------------------------------------------
+const COOKIE_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+function tryParseCookieHeader(text) {
+  const raw = String(text);
+  if (/[{}[\]]/.test(raw)) return null;
+  const pairs = [];
+  for (let line of raw.split(/\r?\n/)) {
+    line = line.trim();
+    if (!line) continue;
+    line = line.replace(/^cookie\s*:\s*/i, '');
+    for (const segRaw of line.split(';')) {
+      const seg = segRaw.trim();
+      if (!seg) continue;
+      const eq = seg.indexOf('=');
+      if (eq <= 0) return null; // 有一段不是 name=value → 整体不是 Cookie 头
+      const name = seg.slice(0, eq).trim();
+      if (!COOKIE_NAME_RE.test(name)) return null;
+      pairs.push({ name: name, value: seg.slice(eq + 1).trim() });
     }
   }
-  if (parsed === undefined || parsed === null) {
-    throw new Error('会话文件不是合法的 JSON，读不了。已试过纯 JSON、带标题行 JSON、Base64 包装三种读法都失败，文件可能是未支持的编码格式，或已损坏。请确认文件没有损坏，或向卖家索取纯 JSON 格式的 cookie 导出。');
+  if (pairs.length === 0) return null;
+  if (pairs.length === 1 && pairs[0].name !== 'sessionid') return null;
+  return pairs.map((p) => ({ name: p.name, value: p.value }));
+}
+
+// 扁平字典 JSON：{ "sessionid": "...", "csrftoken": "...", ... }
+// 顶层每个值都必须是字符串/数字才认定（值里的真假不进判定）。
+function tryDictCookies(parsed) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  if (Array.isArray(parsed.cookies)) return null; // 那是 {cookies:[...]} 形状，归 json-object
+  const entries = Object.entries(parsed);
+  if (entries.length === 0) return null;
+  if (!entries.every(([, v]) => typeof v === 'string' || typeof v === 'number')) return null;
+  return entries.map(([name, v]) => ({ name: name, value: String(v) }));
+}
+
+// 已解析的 JSON → { format, cookies(转换后), names } 或 null（形状不认）。
+function convertParsedJson(parsed) {
+  if (Array.isArray(parsed)) {
+    const conv = convertRawCookies(parsed, []);
+    return { format: 'json-array', cookies: conv.cookies, origins: conv.origins, names: conv.names };
   }
-  return toStorageState(parsed);
+  if (parsed && typeof parsed === 'object') {
+    if (Array.isArray(parsed.cookies)) {
+      const conv = convertRawCookies(parsed.cookies, parsed.origins);
+      return { format: 'json-object', cookies: conv.cookies, origins: conv.origins, names: conv.names };
+    }
+    const dict = tryDictCookies(parsed);
+    if (dict) {
+      const conv = convertRawCookies(dict, []);
+      return { format: 'json-dict', cookies: conv.cookies, origins: conv.origins, names: conv.names };
+    }
+  }
+  return null;
+}
+
+// 把一份“转换结果”收尾成体检结论：有 sessionid 就是可用（给出 storageState），
+// 没有就带着格式信息报 missing_sessionid（只点名，不带值）。
+function finalizeConversion(conv, format) {
+  const hasSid = conv.cookies.some((c) => c.name === 'sessionid');
+  if (hasSid) {
+    return {
+      format: format,
+      cookieNames: Array.from(new Set(conv.names)).sort().slice(0, 30),
+      hasSessionid: true,
+      storageState: { cookies: conv.cookies, origins: conv.origins },
+      error: null,
+    };
+  }
+  const err = missingSessionidError();
+  err.formatDetected = format;
+  return {
+    format: format,
+    cookieNames: Array.from(new Set(conv.names)).sort().slice(0, 30),
+    hasSessionid: false,
+    storageState: null,
+    error: err,
+  };
+}
+
+// 核心分析管线（已解码的文本进）：依次试 JSON（含字典）→ Base64 → Netscape →
+// Cookie 头。返回 { format, cookieNames, hasSessionid, storageState, error }，
+// 全程不把 cookie 的值放进任何字段（storageState 本身除外——那是内部使用对象）。
+function analyzeText(text) {
+  const raw = String(text || '').replace(/^\uFEFF/, '');
+  if (!raw.trim()) {
+    const err = new Error('会话文件是空的，里面什么都没有。请确认放进来的文件没选错。');
+    err.code = 'empty';
+    return { format: 'unknown', cookieNames: [], hasSessionid: false, storageState: null, error: err };
+  }
+
+  // 1) JSON 家族（纯 JSON / 带标签行 / 扁平字典）
+  const parsed = tryParseJsonText(raw);
+  if (parsed !== undefined && parsed !== null) {
+    const conv = convertParsedJson(parsed);
+    if (conv) return finalizeConversion(conv, conv.format);
+    // JSON 能解开但形状不认：继续往下试别的格式也没有意义，直接报格式不对
+    const err = new Error('会话文件格式不对：没有找到 cookies 数组。请确认导出的文件是 cookie JSON 或本工具的 .storage.json。');
+    err.code = 'no_cookies_array';
+    err.formatDetected = 'json-object';
+    return { format: 'json-object', cookieNames: [], hasSessionid: false, storageState: null, error: err };
+  }
+
+  // 2) Base64 包装（解开后回到 JSON 家族；外层格式记 base64包装）
+  for (const cand of base64Candidates(raw)) {
+    let decoded = '';
+    try { decoded = decodeBase64(cand); } catch (_) { continue; }
+    if (!decoded) continue;
+    const inner = tryParseJsonText(decoded.replace(/^\uFEFF/, ''));
+    if (inner === undefined || inner === null) continue;
+    const conv = convertParsedJson(inner);
+    if (conv) return finalizeConversion(conv, 'base64');
+  }
+
+  // 3) Netscape cookies.txt
+  const netscape = tryParseNetscape(raw);
+  if (netscape) {
+    const conv = convertRawCookies(netscape, []);
+    return finalizeConversion(conv, 'netscape');
+  }
+
+  // 4) Cookie 头风格
+  const header = tryParseCookieHeader(raw);
+  if (header) {
+    const conv = convertRawCookies(header, []);
+    return finalizeConversion(conv, 'cookie-header');
+  }
+
+  const err = new Error('会话文件读不了，已试过的读法都失败：纯 JSON、带标题行 JSON、Base64 包装、Netscape cookies.txt、Cookie 头。文件可能是未支持的格式，或已损坏。可以先跑 node collector.js --check-cookies 看每个文件被认成什么格式，或向卖家索取纯 JSON 格式的 cookie 导出。');
+  err.code = 'unparseable';
+  return { format: 'unknown', cookieNames: [], hasSessionid: false, storageState: null, error: err };
+}
+
+// 字节 → 体检结论（先过编码层再进分析管线）
+function analyzeSessionBuffer(buf) {
+  const buffer = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf || ''), 'utf8');
+  const decoded = decodeBufferText(buffer);
+  const result = analyzeText(decoded.text);
+  result.encoding = decoded.encoding;
+  return result;
+}
+
+// 从文件内容文本解析会话（--import-session 与 --import-cookies 共用入口）。
+function parseSessionText(text) {
+  const result = analyzeText(text);
+  if (!result.storageState) throw result.error;
+  return result.storageState;
+}
+
+// 从文件字节解析会话（编码层 + 全部格式）。cookies/ 扫描和 loadSessionFile 走这里，
+// 这样 UTF-16 之类记事本编码的文件也能读。
+function parseSessionBuffer(buf) {
+  const result = analyzeSessionBuffer(buf);
+  if (!result.storageState) throw result.error;
+  return result.storageState;
 }
 
 function loadSessionFile(filePath) {
-  let text;
+  let buf;
   try {
-    text = fs.readFileSync(filePath, 'utf8');
+    buf = fs.readFileSync(filePath);
   } catch (e) {
     throw new Error('会话文件读不到：' + filePath + '（请确认路径正确）');
   }
-  return parseSessionText(text);
+  return parseSessionBuffer(buf);
 }
 
 // sessions/<用户名>.storage.json 的落盘路径（用户名做安全化处理）
@@ -228,12 +488,17 @@ function writeStorageStateFile(filePath, state) {
 module.exports = {
   LOGIN_CRITICAL_COOKIES,
   IG_DOMAIN,
+  FORMAT_LABELS,
   isInstagramDomain,
   normalizeCookie,
   toStorageState,
   summarizeState,
   hasCookie,
+  decodeBufferText,
+  analyzeText,
+  analyzeSessionBuffer,
   parseSessionText,
+  parseSessionBuffer,
   loadSessionFile,
   sessionFilePath,
   writeStorageStateFile,

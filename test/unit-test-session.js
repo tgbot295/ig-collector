@@ -208,4 +208,115 @@ ok('base64 hygiene: error messages contain no fake cookie value', () => {
   assert.ok(!blob.includes(FAKE_CSRF), 'csrftoken value leaked into error');
 });
 
+// ---- 新格式：编码层（BOM / UTF-16）、Netscape、Cookie 头、扁平字典 ----
+const PLAIN_JSON = JSON.stringify(FAKE_COOKIES_ARRAY);
+
+ok('encoding: UTF-8 BOM json parses via buffer', () => {
+  const buf = Buffer.concat([Buffer.from([0xEF, 0xBB, 0xBF]), Buffer.from(PLAIN_JSON, 'utf8')]);
+  assert.strictEqual(sessionStore.decodeBufferText(buf).encoding, 'utf8-bom');
+  const st = sessionStore.parseSessionBuffer(buf);
+  assert.ok(sessionStore.hasCookie(st, 'sessionid'));
+});
+
+ok('encoding: UTF-16LE with BOM parses via buffer', () => {
+  const buf = Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from(PLAIN_JSON, 'utf16le')]);
+  assert.strictEqual(sessionStore.decodeBufferText(buf).encoding, 'utf16le');
+  const st = sessionStore.parseSessionBuffer(buf);
+  assert.strictEqual(st.cookies.length, 3);
+  assert.ok(sessionStore.hasCookie(st, 'sessionid'));
+});
+
+ok('encoding: UTF-16BE with BOM parses via buffer', () => {
+  const le = Buffer.from(PLAIN_JSON, 'utf16le');
+  const be = Buffer.alloc(le.length);
+  for (let i = 0; i + 1 < le.length; i += 2) { be[i] = le[i + 1]; be[i + 1] = le[i]; }
+  const buf = Buffer.concat([Buffer.from([0xFE, 0xFF]), be]);
+  assert.strictEqual(sessionStore.decodeBufferText(buf).encoding, 'utf16be');
+  const st = sessionStore.parseSessionBuffer(buf);
+  assert.ok(sessionStore.hasCookie(st, 'sessionid'));
+});
+
+ok('encoding: UTF-16LE without BOM guessed from NUL distribution', () => {
+  const buf = Buffer.from(PLAIN_JSON, 'utf16le');
+  const st = sessionStore.parseSessionBuffer(buf);
+  assert.ok(sessionStore.hasCookie(st, 'sessionid'));
+});
+
+const nsLine = (domain, name, value, exp) =>
+  [domain, 'TRUE', '/', 'TRUE', String(exp || 1893456000), name, value].join('\t');
+const NETSCAPE_TEXT = [
+  '# Netscape HTTP Cookie File',
+  '# 这是注释行，应该被跳过',
+  nsLine('.instagram.com', 'csrftoken', FAKE_CSRF),
+  '#HttpOnly_' + nsLine('.instagram.com', 'sessionid', FAKE_SESSION_ID),
+  nsLine('.instagram.com', 'ds_user_id', '1234567890'),
+  nsLine('.google.com', 'NID', 'fake-google-cookie'),
+  '',
+].join('\n');
+
+ok('netscape: parses, #HttpOnly_ sessionid kept + httpOnly, other domains dropped', () => {
+  const st = sessionStore.parseSessionText(NETSCAPE_TEXT);
+  assert.strictEqual(st.cookies.length, 3);
+  const sid = st.cookies.find((c) => c.name === 'sessionid');
+  assert.ok(sid, 'sessionid present');
+  assert.strictEqual(sid.httpOnly, true);
+  assert.strictEqual(sid.expires, 1893456000);
+  assert.ok(st.cookies.every((c) => !String(c.domain).includes('google')));
+});
+
+ok('netscape: missing sessionid error carries format + names it, no values', () => {
+  const noSid = ['# Netscape HTTP Cookie File', nsLine('.instagram.com', 'csrftoken', FAKE_CSRF)].join('\n');
+  let err = null;
+  try { sessionStore.parseSessionText(noSid); } catch (e) { err = e; }
+  assert.ok(err, 'should throw');
+  assert.strictEqual(err.code, 'missing_sessionid');
+  assert.strictEqual(err.formatDetected, 'netscape');
+  assert.ok(err.message.includes('sessionid'));
+  assert.ok(!err.message.includes(FAKE_CSRF), 'value leaked into error');
+});
+
+ok('cookie header: single line parses with defaults', () => {
+  const st = sessionStore.parseSessionText(
+    'sessionid=' + FAKE_SESSION_ID + '; csrftoken=' + FAKE_CSRF + '; ds_user_id=1234567890');
+  assert.strictEqual(st.cookies.length, 3);
+  const sid = st.cookies.find((c) => c.name === 'sessionid');
+  assert.strictEqual(sid.domain, '.instagram.com');
+  assert.strictEqual(sid.httpOnly, true);
+});
+
+ok('cookie header: multi-line with Cookie: prefix parses', () => {
+  const text = 'Cookie: sessionid=' + FAKE_SESSION_ID + '\ncsrftoken=' + FAKE_CSRF + '; ds_user_id=1234567890';
+  const st = sessionStore.parseSessionText(text);
+  assert.strictEqual(st.cookies.length, 3);
+  assert.ok(sessionStore.hasCookie(st, 'sessionid'));
+});
+
+ok('flat dict json: {name: value} object parses', () => {
+  const st = sessionStore.parseSessionText(JSON.stringify({
+    sessionid: FAKE_SESSION_ID, csrftoken: FAKE_CSRF, ds_user_id: '1234567890',
+  }));
+  assert.strictEqual(st.cookies.length, 3);
+  assert.ok(sessionStore.hasCookie(st, 'sessionid'));
+});
+
+ok('analyze: format labels + names reported, values never in report', () => {
+  const aNs = sessionStore.analyzeSessionBuffer(Buffer.from(NETSCAPE_TEXT, 'utf8'));
+  assert.strictEqual(sessionStore.FORMAT_LABELS[aNs.format], 'netscape');
+  assert.strictEqual(aNs.hasSessionid, true);
+  // 体检报的是文件里读到的全部 cookie 名字（含非 IG 的 NID，只有名字没有值）；
+  // 真正转换出的 storageState 才只留 IG 的那几个。
+  assert.deepStrictEqual(aNs.cookieNames, ['NID', 'csrftoken', 'ds_user_id', 'sessionid']);
+  const aHead = sessionStore.analyzeSessionBuffer(Buffer.from('csrftoken=' + FAKE_CSRF + '; sessionid=' + FAKE_SESSION_ID, 'utf8'));
+  assert.strictEqual(sessionStore.FORMAT_LABELS[aHead.format], 'cookie头');
+  const aJunk = sessionStore.analyzeSessionBuffer(Buffer.from('%%% 乱码，不是 cookie %%%', 'utf8'));
+  assert.strictEqual(sessionStore.FORMAT_LABELS[aJunk.format], '未知');
+  assert.strictEqual(aJunk.hasSessionid, false);
+  const blob = JSON.stringify([aNs, aHead, aJunk].map((a) => ({
+    format: a.format, cookieNames: a.cookieNames, hasSessionid: a.hasSessionid,
+    error: a.error ? a.error.message : null,
+  })));
+  assert.ok(!blob.includes(FAKE_SESSION_ID), 'sessionid value leaked into analyze report');
+  assert.ok(!blob.includes(FAKE_CSRF), 'csrftoken value leaked into analyze report');
+});
+
 console.log('会话文件单测全部通过：' + passed + ' 项');

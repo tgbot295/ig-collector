@@ -1,25 +1,27 @@
 @echo off
-chcp 65001 >nul
+chcp 936 >nul
+rem ±àÂëËµÃ÷£º±¾ÎÄ¼þÊÇ GBK ±àÂë£¨ÖÐÎÄ Windows µÄ cmd Ä¬ÈÏ°´ GBK ¶ÁÅú´¦Àí£©¡£
+rem ²»ÒªÓÃ¼ÇÊÂ±¾ / VS Code °ÑËüÁí´æÎª UTF-8£¬·ñÔòÖÐÎÄ»á±»²ð³ÉÂÒÂëÃüÁî¡£
 setlocal EnableDelayedExpansion
 cd /d %~dp0
 title IG Collector
 
 where node >nul 2>nul
 if errorlevel 1 (
-  echo æ²¡æ‰¾åˆ° Node.jsï¼Œè¯·å…ˆå®‰è£… Node.js LTSï¼ˆnodejs.orgï¼‰ï¼Œè£…å®Œå…³æŽ‰çª—å£é‡å¼€å†åŒå‡»æœ¬æ–‡ä»¶ã€‚
+  echo Ã»ÕÒµ½ Node.js£¬ÇëÏÈ°²×° Node.js LTS£¨nodejs.org£©£¬×°Íê¹Øµô´°¿ÚÖØ¿ªÔÙË«»÷±¾ÎÄ¼þ¡£
   pause
   exit /b 1
 )
 
 if not exist node_modules (
-  echo ç¬¬ä¸€æ¬¡è¿è¡Œï¼šæ­£åœ¨å®‰è£…ä¾èµ–...
+  echo µÚÒ»´ÎÔËÐÐ£ºÕýÔÚ°²×°ÒÀÀµ...
   call npm install
-  if errorlevel 1 ( echo ä¾èµ–å®‰è£…å¤±è´¥ï¼ŒæŠŠä¸Šé¢çš„çº¢å­—æˆªå›¾å‘å‡ºæ¥ã€‚ & pause & exit /b 1 )
+  if errorlevel 1 ( echo ÒÀÀµ°²×°Ê§°Ü£¬°ÑÉÏÃæµÄºì×Ö½ØÍ¼·¢³öÀ´¡£ & pause & exit /b 1 )
 )
 
-rem æµè§ˆå™¨ç”¨æœ¬æœºçŽ°æˆçš„ Chrome / Edgeï¼Œä¸å†å¦å¤–ä¸‹è½½å†…æ ¸
-rem ï¼ˆPlaywright è‡ªå¸¦ Chromium çš„ä¸‹è½½æºåœ¨å›½å†…ä¼šè¢«å¢™ï¼Œ403 è£…ä¸ä¸Šï¼‰ã€‚
-rem è¿™é‡Œåªåšè½¯æ£€æŸ¥ï¼šä¸¤ä¸ªéƒ½æ²¡è£…æ‰æ‹¦ä¸‹æ¥æé†’ã€‚
+rem ä¯ÀÀÆ÷ÓÃ±¾»úÏÖ³ÉµÄ Chrome / Edge£¬²»ÔÙÁíÍâÏÂÔØÄÚºË
+rem £¨Playwright ×Ô´ø Chromium µÄÏÂÔØÔ´ÔÚ¹úÄÚ»á±»Ç½£¬403 ×°²»ÉÏ£©¡£
+rem ÕâÀïÖ»×öÈí¼ì²é£ºÁ½¸ö¶¼Ã»×°²ÅÀ¹ÏÂÀ´ÌáÐÑ¡£
 set BROWSER_FOUND=
 if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" set BROWSER_FOUND=1
 if exist "%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe" set BROWSER_FOUND=1
@@ -27,18 +29,18 @@ if exist "%LocalAppData%\Google\Chrome\Application\chrome.exe" set BROWSER_FOUND
 if exist "%ProgramFiles%\Microsoft\Edge\Application\msedge.exe" set BROWSER_FOUND=1
 if exist "%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe" set BROWSER_FOUND=1
 if not defined BROWSER_FOUND (
-  echo å…ˆè£…ä¸€ä¸ª Google Chromeï¼Œè¿™ä¸ªè„šæœ¬ç”¨ä½ ç”µè„‘ä¸ŠçŽ°æˆçš„æµè§ˆå™¨ï¼Œä¸å†å¦å¤–ä¸‹è½½ã€‚
+  echo ÏÈ×°Ò»¸ö Google Chrome£¬Õâ¸ö½Å±¾ÓÃÄãµçÄÔÉÏÏÖ³ÉµÄä¯ÀÀÆ÷£¬²»ÔÙÁíÍâÏÂÔØ¡£
   pause
   exit /b 1
 )
 
 set KEYWORD=downjacket
-set /p KEYWORD=è¾“å…¥å…³é”®è¯ï¼ˆç›´æŽ¥å›žè½¦å°±ç”¨ downjacketï¼‰ï¼š
+set /p KEYWORD=ÊäÈë¹Ø¼ü´Ê£¨Ö±½Ó»Ø³µ¾ÍÓÃ downjacket£©£º
 if "!KEYWORD!"=="" set KEYWORD=downjacket
 
-rem è‡ªåŠ¨æ¨¡å¼ï¼šcookies æ–‡ä»¶å¤¹é‡Œæœ‰éžè¯´æ˜Žæ–‡ä»¶ã€æˆ–æ ¹ç›®å½•æœ‰ cookies.txt / cookies.jsonã€
-rem æˆ–æœ‰ accounts.txtï¼Œå°±ç›´æŽ¥è®©è„šæœ¬è‡ªå·±æŒ‘ç™»å½•æ¥æºï¼ˆè„šæœ¬çš„è‡ªåŠ¨æ¨¡å¼ä¼šå¤„ç†ï¼Œ
-rem åŒ…æ‹¬ accounts.txt å¤šä¸ªè´¦å·æ—¶åœ¨ç»ˆç«¯é‡Œè®©ä½ é€‰ï¼‰ã€‚
+rem ×Ô¶¯Ä£Ê½£ºcookies ÎÄ¼þ¼ÐÀïÓÐ·ÇËµÃ÷ÎÄ¼þ¡¢»ò¸ùÄ¿Â¼ÓÐ cookies.txt / cookies.json¡¢
+rem »òÓÐ accounts.txt£¬¾ÍÖ±½ÓÈÃ½Å±¾×Ô¼ºÌôµÇÂ¼À´Ô´£¨½Å±¾µÄ×Ô¶¯Ä£Ê½»á´¦Àí£¬
+rem °üÀ¨ accounts.txt ¶à¸öÕËºÅÊ±ÔÚÖÕ¶ËÀïÈÃÄãÑ¡£©¡£
 set FOUND=
 if exist cookies (
   for %%F in (cookies\*) do (
@@ -51,12 +53,12 @@ if exist cookies.json set FOUND=1
 if exist accounts.txt set FOUND=1
 
 if defined FOUND (
-  echo è‡ªåŠ¨æ¨¡å¼å¯åŠ¨ï¼Œå…³é”®è¯ï¼š!KEYWORD!ï¼ˆè„šæœ¬ä¼šè‡ªåŠ¨è¯»å– cookies æ–‡ä»¶å¤¹é‡Œçš„ä¼šè¯æ–‡ä»¶ï¼‰
+  echo ×Ô¶¯Ä£Ê½Æô¶¯£¬¹Ø¼ü´Ê£º!KEYWORD!£¨½Å±¾»á×Ô¶¯¶ÁÈ¡ cookies ÎÄ¼þ¼ÐÀïµÄ»á»°ÎÄ¼þ£©
   node collector.js --keyword !KEYWORD!
 ) else (
-  echo å…ˆæŠŠå–å®¶ç»™çš„ cookie æ–‡ä»¶æ”¾è¿› cookies æ–‡ä»¶å¤¹ï¼ˆæ–‡ä»¶åéšä¾¿ï¼‰ï¼Œå†åŒå‡»æœ¬æ–‡ä»¶ã€‚
+  echo ÏÈ°ÑÂô¼Ò¸øµÄ cookie ÎÄ¼þ·Å½ø cookies ÎÄ¼þ¼Ð£¨ÎÄ¼þÃûËæ±ã£©£¬ÔÙË«»÷±¾ÎÄ¼þ¡£
 )
 
 echo.
-echo è·‘å®Œäº†ã€‚ç»“æžœåœ¨ out æ–‡ä»¶å¤¹é‡Œã€‚æŒ‰ä»»æ„é”®å…³çª—å£ã€‚
+echo ÅÜÍêÁË¡£½á¹ûÔÚ out ÎÄ¼þ¼ÐÀï¡£°´ÈÎÒâ¼ü¹Ø´°¿Ú¡£
 pause >nul

@@ -39,8 +39,13 @@ console.log([
 ' --account <用户名> 用 accounts.txt 里这个账号自动登录（一次只跑一个账号）',
 ' --manual 强制手动登录模式（忽略 accounts.txt）',
 ' --import-session <文件> 用会话文件直登（本工具导出的 .storage.json，类似 TG 的 .session）',
-' --import-cookies <文件> 用 cookie 的 JSON 直登（数组或 {cookies:[...]} 都行，关键看 sessionid）',
+' --import-cookies <文件> 用 cookie 文件直登（JSON 数组/对象、Netscape cookies.txt、',
+'    Cookie 头都认，关键看 sessionid；UTF-16 等记事本编码也能读）',
 ' --cookies-dir <目录> 自动模式扫描的 cookie 文件夹，默认 ./cookies',
+' --check-cookies 只体检 cookie 文件（不登录、不采集）：扫描 cookies 文件夹',
+'    （可用 --cookies-dir 换目录）和根目录 cookies.txt / cookies.json，逐个文件',
+'    只报文件名、认出的格式、cookie 名字（绝不报值）、有没有 sessionid 和结论，',
+'    然后退出。文件被跳过又不知道为什么时，先跑这个看。',
 ' --browser <chrome|msedge|chromium> 强制只用某个浏览器；不给时依次试本机',
 '    Google Chrome、Microsoft Edge、Playwright 自带 Chromium。也可用环境',
 '    变量 IG_COLLECTOR_BROWSER 指定（--browser 优先）。推荐用本机 Chrome：',
@@ -71,10 +76,11 @@ return String(raw || '').replace(/^#+/, '').replace(/\s+/g, '').trim();
 }
 
 function parseArgs(argv) {
-const args = { keyword: '', posts: config.limits.postsDefault, comments: config.limits.commentsDefault, headless: false, help: false, account: '', manual: false, importSession: '', importCookies: '', cookiesDir: config.cookiesDir, browser: '' };
+const args = { keyword: '', posts: config.limits.postsDefault, comments: config.limits.commentsDefault, headless: false, help: false, account: '', manual: false, importSession: '', importCookies: '', cookiesDir: config.cookiesDir, browser: '', checkCookies: false };
 for (let i = 0; i < argv.length; i++) {
 const a = argv[i];
 if (a === '--help' || a === '-h') args.help = true;
+else if (a === '--check-cookies') args.checkCookies = true;
 else if (a === '--headless') args.headless = true;
 else if (a === '--manual') args.manual = true;
 else if (a === '--import-session') args.importSession = String(argv[++i] || '').trim();
@@ -392,8 +398,42 @@ await smallPause();
 return Array.from(byKey.values()).slice(0, limit);
 }
 
+// --check-cookies 体检：逐个文件只报文件名、格式、cookie 名字（绝不报值）、
+// 有没有 sessionid 和结论。用户把输出贴回来就能定位“文件为什么被跳过”，
+// 不需要把文件本身发给任何人。
+function runCheckCookies(args) {
+const targets = [];
+for (const cand of cookiesDir.scanCookiesDir(args.cookiesDir)) {
+targets.push({ fullPath: cand.fullPath, label: cand.file });
+}
+for (const rootName of ['cookies.txt', 'cookies.json']) {
+const rootPath = path.join(__dirname, rootName);
+if (fs.existsSync(rootPath)) targets.push({ fullPath: rootPath, label: rootName + '（根目录）' });
+}
+console.log('cookie 文件体检（只报文件名、格式和 cookie 名字，绝不报任何值）：');
+if (targets.length === 0) {
+console.log('（一个文件都没找到：cookies 文件夹是空的，根目录也没有 cookies.txt / cookies.json）');
+console.log('先把卖家给的 cookie 文件放进 cookies 文件夹（文件名随便），再跑一次。');
+return 0;
+}
+for (const t of targets) {
+const d = cookiesDir.diagnoseFile(t.fullPath, t.label);
+const names = d.cookieNames.length > 0 ? d.cookieNames.join('、') : '（无）';
+if (d.ok) {
+console.log('[可用] ' + d.file + ' — 格式：' + d.format + '；cookie：' + names + '；sessionid：有');
+} else {
+console.log('[不可用] ' + d.file + ' — 格式：' + d.format + '；cookie：' + names +
+'；sessionid：' + (d.hasSessionid ? '有' : '无') + '；原因：' + d.reason);
+}
+}
+return 0;
+}
+
 async function run(argv) {
 const args = parseArgs(argv);
+if (args.checkCookies) {
+return runCheckCookies(args);
+}
 if (args.help ||!args.keyword) {
 printUsage();
 return 0;
@@ -802,4 +842,4 @@ process.exit(1);
 });
 }
 
-module.exports = { parseArgs, cleanKeyword, printUsage};
+module.exports = { parseArgs, cleanKeyword, printUsage, runCheckCookies};
