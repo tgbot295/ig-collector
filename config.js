@@ -33,7 +33,7 @@ module.exports = {
   blocklist: DEFAULT_BLOCKLIST,
 
   limits: {
-    postsDefault: 20,
+    postsDefault: 50,
     postsMax: 50,        // 单次帖子硬上限
     commentsDefault: 50, // 每帖评论默认上限
     commentsMax: 200,
