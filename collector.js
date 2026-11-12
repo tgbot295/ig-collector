@@ -14,6 +14,7 @@ const readline = require('readline');
 const config = require('./config');
 const guard = require('./src/guard');
 const extract = require('./src/extract');
+const extractDom = require('./src/extractDom');
 const accounts = require('./src/accounts');
 const { generateTotp } = require('./src/totp');
 const sessionStore = require('./src/session');
@@ -275,6 +276,11 @@ return (j && j.user && j.user.username) || null;
 if (viaApi) return viaApi;
 } catch (_) { /* 忽略，走 DOM 兜底 */}
 try {
+// 左侧导航里的本人资料锚点（带头像图或 aria-label=Profile 的 /<用户名>/ 链接）
+const viaNav = await page.evaluate(extractDom.navProfileUsernameInPage);
+if (viaNav) return viaNav;
+} catch (_) { /* 忽略 */}
+try {
 const viaDom = await page.evaluate(() => {
 const imgs = Array.from(document.querySelectorAll('img[alt]'));
 for (const img of imgs) {
@@ -482,8 +488,54 @@ await saveDebugEvidence(page, context, { reason: 'not_logged_in', signals: lastS
 return { ok: false, reason: 'not_logged_in' };
 }
 
-// 从帖子页提取数据：页面内嵌 JSON 优先，og 元信息补计数；评论再从 DOM 展开读取
+// 单帖调试证据：帖子既没读出作者、评论又是 0 条时，把“脚本眼里的页面”
+// 存下来定性（out/debug-post-<shortCode>.png 截图 + 同名 .json）。
+// JSON 只有页面结构计数（锚点总数/资料锚点数/评论行候选数）、URL、标题
+// 和“有没有评论列”，不存 HTML、不存任何 cookie/账号值。
+async function savePostDebugEvidence(page, link, index, meta) {
+fs.mkdirSync(config.outDir, { recursive: true });
+const tag = link.shortCode || ('post-' + (index + 1));
+const pngFile = path.join(config.outDir, 'debug-post-' + tag + '.png');
+const jsonFile = path.join(config.outDir, 'debug-post-' + tag + '.json');
+try {
+await page.screenshot({ path: pngFile, timeout: 10000 });
+} catch (_) { /* 截不到图不影响结论，JSON 照样写 */}
+let title = '';
+try { title = await page.title(); } catch (_) { /* 忽略 */}
+const m = meta || {};
+const counts = m.counts || {};
+const record = {
+savedAt: new Date().toISOString(),
+url: link.url,
+title: title,
+counts: {
+anchorsTotal: counts.anchorsTotal || 0,
+profileAnchors: counts.profileAnchors || 0,
+commentRowCandidates: counts.commentRowCandidates || 0,
+},
+hasCommentsContainer: !!m.hasCommentsContainer,
+};
+try {
+fs.writeFileSync(jsonFile, JSON.stringify(record, null, 2), 'utf8');
+} catch (_) { /* 忽略 */}
+console.log('这条帖子没读出作者和评论，已存调试证据：' + pngFile + ' 和 ' + jsonFile + '（只有页面结构计数）。');
+return { pngFile: pngFile, jsonFile: jsonFile };
+}
+
+// 从帖子页提取数据：可见 DOM 优先（作者看页头锚点、文案看文案行），
+// 页面内嵌 JSON 退为兜底合并来源，og 元信息补计数。
+// 返回 { post, payloadComments, domComments, domMeta }，domMeta 是页面
+// 结构计数（供 0 结果时存调试证据）。
 async function extractPostData(page, link) {
+try { await page.waitForLoadState('load', { timeout: 12000 }); } catch (_) { /* 忽略 */}
+await sleep(1500);
+
+let snap = null;
+try {
+snap = await page.evaluate(extractDom.harvestPostDomInPage);
+} catch (_) { /* 读不到 DOM 快照就走旧兜底 */}
+const dom = snap ? extractDom.analyzeSnapshot(snap, link.url, config.limits.commentsMax) : null;
+
 let result = null;
 try {
 const html = await page.content();
@@ -509,27 +561,45 @@ id: null, shortCode: link.shortCode, type: '', caption: '', hashtags: [],
 mentions: [], url: link.url, likesCount: null, commentsCount: null,
 timestamp: null, displayUrl: '', videoUrl: '', ownerUsername: '', ownerFullName: '',
 };
+// 作者判定顺序（写死）：DOM 页头锚点 → 内嵌 JSON 作者 → 文案行作者。
+// 评论人绝不直接当作者（文案行是评论列表第一行、且仅当前两路都没有时才用）。
+const owner = extractDom.pickOwnerUsername({
+headerOwner: dom ? dom.headerOwner : '',
+payloadOwner: post.ownerUsername,
+captionAuthor: dom ? dom.captionAuthor : '',
+});
+if (owner) post.ownerUsername = owner;
+// 文案：JSON 没有时用 DOM 文案行的正文（且文案行作者必须就是最终作者）
+if (!post.caption && dom && dom.captionText && dom.captionAuthor &&
+dom.captionAuthor === post.ownerUsername) {
+post.caption = dom.captionText;
+post.hashtags = extract.extractHashtags(post.caption);
+}
 const counts = extract.parseOgCounts(og.ogDesc);
 if (post.likesCount === null || post.likesCount === undefined) post.likesCount = counts.likesCount;
 if (post.commentsCount === null || post.commentsCount === undefined) post.commentsCount = counts.commentsCount;
 if (!post.displayUrl && og.ogImage) post.displayUrl = og.ogImage;
 if (!post.url) post.url = link.url;
 if (!post.shortCode) post.shortCode = link.shortCode;
-return { post: post, payloadComments: (result && result.comments) || []};
+return {
+post: post,
+payloadComments: (result && result.comments) || [],
+domComments: dom ? dom.comments : [],
+domMeta: dom ? { counts: dom.counts, hasCommentsContainer: dom.hasCommentsContainer } : null,
+};
 }
 
-// 在帖子页展开评论区并从 DOM 读评论（尽力而为，读不到就返回已有的）
-async function collectDomComments(page, postUrl, limit, existing) {
-const byKey = new Map();
-const add = (c) => {
-if (!c || (!c.text &&!c.ownerUsername)) return;
-const key = (c.ownerUsername || '') + '|' + (c.text || '');
-if (!byKey.has(key)) byKey.set(key, c);
-};
-(existing || []).forEach(add);
+// 评论采集：以可见 DOM 为主来源——先拿 extractPostData 已经收割的一屏，
+// 不够就滚评论列（harvest 时标记的容器）逐轮重收割；旧内嵌 JSON 评论
+// 作为次来源合并去重。连续两轮没有新评论就停（评论已见底）。
+// 返回 { comments, meta }，meta 是最后一轮的页面结构计数（调试证据用）。
+async function collectPostComments(page, link, limit, data) {
+const postUrl = (data.post && data.post.url) || link.url;
+let merged = extractDom.mergeComments(data.domComments, data.payloadComments, limit);
+let meta = data.domMeta || null;
 
 // 尝试点开“查看全部评论”
-for (let i = 0; i < 3; i++) {
+for (let i = 0; i < 3 && merged.length < limit; i++) {
 try {
 const btn = page.getByText(/view all|view more|查看全部|查看更多|展开评论/i).first();
 await btn.click({ timeout: 2500});
@@ -538,50 +608,26 @@ await smallPause();
 }
 
 let stagnant = 0;
-for (let round = 0; round < 12 && byKey.size < limit; round++) {
-let rows = [];
+for (let round = 0; round < 12 && merged.length < limit; round++) {
 try {
-rows = await page.evaluate(() => {
-const root = document.querySelector('div[role="dialog"]') || document.querySelector('article') || document.body;
-const out = [];
-root.querySelectorAll('ul li').forEach((li) => {
-const a = li.querySelector('a[href^="/"]');
-if (!a) return;
-const username = (a.textContent || '').trim();
-if (!username || /\s/.test(username)) return;
-let text = '';
-li.querySelectorAll('span').forEach((s) => {
-const t = (s.textContent || '').trim();
-if (t && t!== username && t.length > text.length &&!/^(like|reply|点赞|回复|查看翻译)/i.test(t)) text = t;
-});
-const time = li.querySelector('time');
-const ts = time? (time.getAttribute('datetime') || null): null;
-if (text) out.push({ ownerUsername: username, text: text, timestamp: ts});
-});
-return out;
-});
+await page.evaluate(extractDom.scrollCommentsInPage);
 } catch (_) { /* 忽略 */}
-
-const before = byKey.size;
-for (const r of rows) {
-add(extract.normalizeComment({ text: r.text, ownerUsername: r.ownerUsername, timestamp: extract.toIso(r.timestamp) || r.timestamp, postUrl: postUrl}));
-}
-if (byKey.size >= limit) break;
-if (byKey.size === before) { stagnant++; if (stagnant >= 2) break;} else stagnant = 0;
-
-// 滚动评论区（找可滚动容器滚到底）+ 整页滚动兜底
-try {
-await page.evaluate(() => {
-const root = document.querySelector('div[role="dialog"]') || document.querySelector('article') || document.body;
-root.querySelectorAll('div, ul').forEach((el) => {
-if (el.scrollHeight > el.clientHeight + 40) el.scrollTop = el.scrollHeight;
-});
-window.scrollBy(0, 800);
-});
-} catch (_) { /* 忽略 */}
+try { await page.mouse.wheel(0, 900); } catch (_) { /* 整页滚动兜底，忽略 */}
 await smallPause();
+
+let snap = null;
+try {
+snap = await page.evaluate(extractDom.harvestPostDomInPage);
+} catch (_) { /* 忽略 */}
+if (!snap) break;
+const dom = extractDom.analyzeSnapshot(snap, postUrl, config.limits.commentsMax);
+meta = { counts: dom.counts, hasCommentsContainer: dom.hasCommentsContainer };
+const before = merged.length;
+merged = extractDom.mergeComments(dom.comments, merged, limit);
+if (merged.length >= limit) break;
+if (merged.length === before) { stagnant++; if (stagnant >= 2) break;} else stagnant = 0;
 }
-return Array.from(byKey.values()).slice(0, limit);
+return { comments: merged, meta: meta };
 }
 
 // --check-cookies 体检：逐个文件只报文件名、格式、cookie 名字（绝不报值）、
@@ -1092,8 +1138,12 @@ stop = await checkStop(page);
 if (stop) { stopWith(stop.reason); break;}
 
 const data = await extractPostData(page, link);
-const comments = await collectDomComments(page, data.post.url || link.url, args.comments, data.payloadComments);
+const cres = await collectPostComments(page, link, args.comments, data);
+const comments = cres.comments;
 data.post.latestComments = comments;
+if (extractDom.needsPostDebug(data.post, comments)) {
+await savePostDebugEvidence(page, link, i, cres.meta);
+}
 output.items.push(data.post);
 for (const c of comments) output.items.push(c);
 output.stats.postsCollected++;
