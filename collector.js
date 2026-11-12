@@ -17,6 +17,7 @@ const extract = require('./src/extract');
 const accounts = require('./src/accounts');
 const { generateTotp } = require('./src/totp');
 const sessionStore = require('./src/session');
+const cookiesDir = require('./src/cookiesDir');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const randInt = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
@@ -38,9 +39,16 @@ console.log([
 ' --manual 强制手动登录模式（忽略 accounts.txt）',
 ' --import-session <文件> 用会话文件直登（本工具导出的 .storage.json，类似 TG 的 .session）',
 ' --import-cookies <文件> 用 cookie 的 JSON 直登（数组或 {cookies:[...]} 都行，关键看 sessionid）',
+' --cookies-dir <目录> 自动模式扫描的 cookie 文件夹，默认 ./cookies',
 ' --help 显示本说明',
 '',
-'两种登录方式：',
+'自动模式（默认）：只给 --keyword、不给任何登录参数时，脚本按顺序自动找',
+'登录来源：cookies/ 文件夹里的卖家 cookie 文件（文件名随便，按文件名顺序',
+'在登录核验阶段逐个试，失效的换下一个，命中主号黑名单立即中止）→',
+'根目录 cookies.txt / cookies.json → accounts.txt（只有一个账号时自动用）。',
+'都没有就显示本说明退出，不会自己乱登。显式参数永远优先于自动模式。',
+'',
+'两种登录方式（显式指定时）：',
 ' A) 账号文件自动登录：把账号写进本目录的 accounts.txt（一行一个：',
 '    用户名----密码----邮箱----TOTP密钥，后两列可省略），运行时加',
 '    --account <用户名> 就会自动填账密登录；有 TOTP 双重验证时自动生成动态码，',
@@ -58,7 +66,7 @@ return String(raw || '').replace(/^#+/, '').replace(/\s+/g, '').trim();
 }
 
 function parseArgs(argv) {
-const args = { keyword: '', posts: config.limits.postsDefault, comments: config.limits.commentsDefault, headless: false, help: false, account: '', manual: false, importSession: '', importCookies: '' };
+const args = { keyword: '', posts: config.limits.postsDefault, comments: config.limits.commentsDefault, headless: false, help: false, account: '', manual: false, importSession: '', importCookies: '', cookiesDir: config.cookiesDir };
 for (let i = 0; i < argv.length; i++) {
 const a = argv[i];
 if (a === '--help' || a === '-h') args.help = true;
@@ -68,6 +76,8 @@ else if (a === '--import-session') args.importSession = String(argv[++i] || '').
 else if (a.startsWith('--import-session=')) args.importSession = a.slice('--import-session='.length).trim();
 else if (a === '--import-cookies') args.importCookies = String(argv[++i] || '').trim();
 else if (a.startsWith('--import-cookies=')) args.importCookies = a.slice('--import-cookies='.length).trim();
+else if (a === '--cookies-dir') args.cookiesDir = String(argv[++i] || '').trim() || config.cookiesDir;
+else if (a.startsWith('--cookies-dir=')) args.cookiesDir = a.slice('--cookies-dir='.length).trim() || config.cookiesDir;
 else if (a === '--account') args.account = String(argv[++i] || '').trim();
 else if (a.startsWith('--account=')) args.account = a.slice('--account='.length).trim();
 else if (a === '--keyword') args.keyword = cleanKeyword(argv[++i] || '');
@@ -410,6 +420,10 @@ sum.cookieNames.join('、') + '。文件等于账号钥匙，只放本地。');
 
 // ---- 账号选择（开浏览器之前完成；一次只跑一个账号，不轮换；会话导入模式跳过）----
 let selected = null;
+// 自动模式（只给 --keyword、没指定任何登录方式）时挑出的候选会话：
+// [{ label, storageState }]，label 只含来源和文件名（不含任何 cookie 值）。
+// 在登录核验阶段按顺序逐个试（见下面浏览器阶段），开始采集后不再换号。
+let autoCandidates = null;
 if (!importMode && !args.manual) {
   if (args.account) {
     if (!fs.existsSync(config.accountsFile)) {
@@ -429,21 +443,56 @@ if (!importMode && !args.manual) {
       return 1;
     }
     selected = sel.account;
-  } else if (fs.existsSync(config.accountsFile)) {
-    const parsedFile = accounts.loadAccounts(config.accountsFile);
-    parsedFile.warnings.forEach((w) => console.log('accounts.txt 第 ' + w.line + ' 行提醒：' + w.message));
-    if (parsedFile.accounts.length === 1) {
-      if (parsedFile.accounts[0].blocked) {
-        console.log('错误：accounts.txt 里唯一的账号 @' + parsedFile.accounts[0].username + ' 是受保护的主号，拒绝用它登录采集。');
-        return 2;
+  } else {
+    // ===== 自动模式（只给了 --keyword）：按顺序自己找登录来源 =====
+    // 1) cookies/ 文件夹里的卖家 cookie 文件（文件名随便，按文件名排序）
+    const dirScan = cookiesDir.loadCandidates(args.cookiesDir);
+    dirScan.unparseable.forEach((u) =>
+      console.log('cookies 文件夹里的文件「' + u.file + '」跳过（' + u.reason + '），不会使用它。'));
+    if (dirScan.parseable.length > 0) {
+      autoCandidates = dirScan.parseable.map((c) => ({ label: 'cookies/' + c.file, storageState: c.storageState }));
+      console.log('自动模式：在 cookies 文件夹里找到 ' + autoCandidates.length +
+        ' 个可用的会话文件，将在登录核验阶段按文件名顺序逐个试。');
+    } else {
+      // 2) 根目录 cookies.txt / cookies.json（旧一键启动的放法，继续认）
+      for (const rootName of ['cookies.txt', 'cookies.json']) {
+        const rootPath = path.join(__dirname, rootName);
+        if (!fs.existsSync(rootPath)) continue;
+        try {
+          const st = sessionStore.loadSessionFile(rootPath);
+          autoCandidates = [{ label: rootName, storageState: st }];
+          console.log('自动模式：使用根目录的 ' + rootName + ' 里的会话登录。');
+          break;
+        } catch (e) {
+          console.log('根目录的 ' + rootName + ' 跳过（' + cookiesDir.reasonCategory(e) + '），不会使用它。');
+        }
       }
-      selected = parsedFile.accounts[0];
-      console.log('accounts.txt 里只有一个账号，本次使用 @' + selected.username + '（可用 --manual 改走手动登录）。');
-    } else if (parsedFile.accounts.length > 1) {
-      console.log('accounts.txt 里有多个账号，本次要用哪一个请明确指定（一次只跑一个）：');
-      accounts.listUsernames(parsedFile.accounts).forEach((u) => console.log('  @' + u));
-      console.log('重新运行并加上：--account <上面的用户名之一>');
-      return 0;
+    }
+    // 3) accounts.txt：只有一个账号时自动用；多个账号不自己挑
+    if (!autoCandidates && fs.existsSync(config.accountsFile)) {
+      const parsedFile = accounts.loadAccounts(config.accountsFile);
+      parsedFile.warnings.forEach((w) => console.log('accounts.txt 第 ' + w.line + ' 行提醒：' + w.message));
+      if (parsedFile.accounts.length === 1) {
+        if (parsedFile.accounts[0].blocked) {
+          console.log('错误：accounts.txt 里唯一的账号 @' + parsedFile.accounts[0].username + ' 是受保护的主号，拒绝用它登录采集。');
+          return 2;
+        }
+        selected = parsedFile.accounts[0];
+        console.log('accounts.txt 里只有一个账号，本次使用 @' + selected.username + '（可用 --manual 改走手动登录）。');
+      } else if (parsedFile.accounts.length > 1) {
+        console.log('accounts.txt 里有多个账号，本次要用哪一个请明确指定（一次只跑一个）：');
+        accounts.listUsernames(parsedFile.accounts).forEach((u) => console.log('  @' + u));
+        console.log('重新运行并加上：--account <上面的用户名之一>');
+        return 1;
+      }
+    }
+    if (!autoCandidates && !selected) {
+      console.log('自动模式没找到任何可用的登录来源：cookies 文件夹里没有能读的会话文件，');
+      console.log('根目录也没有 cookies.txt / cookies.json，accounts.txt 里也没有可自动使用的账号。');
+      console.log('先把卖家给的 cookie 文件放进 cookies 文件夹（文件名随便），或者建好 accounts.txt，');
+      console.log('或者用 --import-session / --import-cookies / --manual 指定登录方式。');
+      printUsage();
+      return 1;
     }
   }
 }
@@ -457,7 +506,7 @@ source: 'local-collector',
 items: [],
 stats: {
 account: null,
-loginMode: importMode || (selected ? 'account-file' : 'manual'),
+loginMode: importMode || (autoCandidates ? 'auto-cookies' : (selected ? 'account-file' : 'manual')),
 postsFound: 0,
 postsCollected: 0,
 commentsCollected: 0,
@@ -499,6 +548,9 @@ context = await browser.newContext({
 storageState: importState,
 viewport: { width: 1280, height: 900},
 });
+} else if (autoCandidates) {
+browser = await chromium.launch({ headless: args.headless });
+// context 在登录核验阶段按候选逐个创建（见下面），这里先不建
 } else {
 context = await chromium.launchPersistentContext(profileDir, {
 headless: args.headless,
@@ -513,7 +565,58 @@ return finish(1);
 }
 
 try {
-const page = context.pages()[0] || (await context.newPage());
+let page = null;
+let username = null;
+
+if (autoCandidates) {
+// ---- 自动模式登录核验：候选会话按顺序逐个试 ----
+// 第一个核验通过（能确认登录账号）的候选用它跑完整程；失效的报文件名换下一个；
+// 回退只发生在这一阶段，一旦开始采集不再换号。核验出的账号若命中黑名单，
+// 在后面统一判定处立即中止整个运行（退出码 2），不会拿它去试下一个候选。
+const triedLabels = [];
+let autoNetError = false;
+for (const cand of autoCandidates) {
+if (context) { try { await context.close();} catch (_) { /* 忽略 */} context = null;}
+try {
+context = await browser.newContext({
+storageState: cand.storageState,
+viewport: { width: 1280, height: 900},
+});
+} catch (e) {
+triedLabels.push(cand.label);
+console.log('会话文件 ' + cand.label + ' 打不开（浏览器上下文创建失败），换下一个候选试。');
+continue;
+}
+page = context.pages()[0] || (await context.newPage());
+page.setDefaultTimeout(config.actionTimeoutMs);
+try {
+await page.goto(config.baseUrl + '/', { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs});
+} catch (e) {
+console.log('打开 Instagram 失败：' + (e && e.message? e.message.split('\n')[0]: e));
+stopWith('network_error');
+autoNetError = true;
+break;
+}
+await smallPause();
+const uname = await detectLoggedInUsername(page);
+if (!uname) {
+triedLabels.push(cand.label);
+console.log('会话文件 ' + cand.label + ' 已失效（session_expired），换下一个候选试。');
+continue;
+}
+username = uname;
+console.log('会话文件 ' + cand.label + ' 核验通过，当前登录账号：@' + username);
+break;
+}
+if (autoNetError) return finish(0);
+if (!username) {
+console.log('自动模式：候选会话全部失效，已逐个试过：' + triedLabels.join('、'));
+console.log('请让卖家重新给一份有效的 cookie 文件放进 cookies 文件夹，或改用 --account / --manual 登录。');
+stopWith('session_expired');
+return finish(0);
+}
+} else {
+page = context.pages()[0] || (await context.newPage());
 page.setDefaultTimeout(config.actionTimeoutMs);
 
 try {
@@ -525,7 +628,8 @@ return finish(0);
 }
 await smallPause();
 
-let username = await detectLoggedInUsername(page);
+username = await detectLoggedInUsername(page);
+}
 if (importMode) {
 if (!username) {
 console.log('导入的会话文件没通过登录核验：账号可能已退出登录、改过密码或被平台过期。');

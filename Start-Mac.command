@@ -21,19 +21,28 @@ fi
 read -r -p "输入关键词（直接回车就用 downjacket）：" KEYWORD
 [ -z "$KEYWORD" ] && KEYWORD=downjacket
 
-if [ -f cookies.txt ]; then
-  echo "用 cookies.txt 里的会话登录，关键词：$KEYWORD"
-  node collector.js --import-cookies cookies.txt --keyword "$KEYWORD"
-elif [ -f cookies.json ]; then
-  echo "用 cookies.json 里的会话登录，关键词：$KEYWORD"
-  node collector.js --import-cookies cookies.json --keyword "$KEYWORD"
-elif [ -f accounts.txt ]; then
-  read -r -p "没找到 cookie 文件。用 accounts.txt 登录，输入里面要用的用户名：" ACC
-  [ -z "$ACC" ] && { echo "没输入用户名，退出。"; read -r -p "按回车关闭..." _; exit 1; }
-  node collector.js --account "$ACC" --keyword "$KEYWORD"
+# 自动模式：cookies 文件夹里有非说明文件、或根目录有 cookies.txt / cookies.json、
+# 或有 accounts.txt，就直接让脚本自己挑登录来源（脚本的自动模式会处理，
+# 包括 accounts.txt 多个账号时在终端里让你选）。
+FOUND=
+if [ -d cookies ]; then
+  for f in cookies/*; do
+    [ -f "$f" ] || continue
+    case "$(basename "$f")" in
+      README*) ;;
+      *) FOUND=1 ;;
+    esac
+  done
+fi
+[ -f cookies.txt ] && FOUND=1
+[ -f cookies.json ] && FOUND=1
+[ -f accounts.txt ] && FOUND=1
+
+if [ -n "$FOUND" ]; then
+  echo "自动模式启动，关键词：$KEYWORD（脚本会自动读取 cookies 文件夹里的会话文件）"
+  node collector.js --keyword "$KEYWORD"
 else
-  echo "没找到文件：请先把卖家给的 cookie 文件改名成 cookies.txt 放到这个文件夹里，"
-  echo "或者把 accounts.txt 放进来，再双击本文件。"
+  echo "先把卖家给的 cookie 文件放进 cookies 文件夹（文件名随便），再双击本文件。"
 fi
 
 echo

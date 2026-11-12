@@ -21,6 +21,11 @@ module.exports = {
   // 是账号钥匙，只放本机，绝不能分享/上传/发聊天，见 sessions/README-警告.md）
   sessionsDir: path.join(__dirname, 'sessions'),
 
+  // 自动模式默认扫描的 cookie 文件夹：卖家给的 cookie 文件丢进来即可，
+  // 文件名任意（可无扩展名），脚本自动读取。里面的文件 = 账号钥匙，
+  // 只放本机，已被 .gitignore 整夹排除（只保留说明文件）。
+  cookiesDir: path.join(__dirname, 'cookies'),
+
   // 账号文件（只放本机，含密码，绝不能分享/上传/发聊天）
   accountsFile: path.join(__dirname, 'accounts.txt'),
 

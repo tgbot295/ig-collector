@@ -9,7 +9,11 @@
 - 每次运行**只用一个账号**，不轮换、不多号并行；遇到验证/限流就停，不会
   换号硬闯。
 
-## 登录方式（二选一）
+## 登录方式
+
+什么都不指定时是**自动模式**：优先自动读 `cookies/` 文件夹里的卖家
+cookie 文件（文件名随便），细则见文末「自动模式」一节。下面两种是显式
+指定的方式，给了参数就优先于自动模式。
 
 ### A) accounts.txt 账号文件自动登录（推荐日常用）
 
@@ -49,7 +53,7 @@ node collector.js --keyword downjacket --account 你的小号用户名
 
 ### B) 手动登录（回退方式）
 
-不建 `accounts.txt`、或加 `--manual` 时走这个方式：脚本弹出浏览器窗口，
+加 `--manual` 时走这个方式（显式指定，优先于自动模式）：脚本弹出浏览器窗口，
 你在窗口里**手动登录**小号（密码只输进 IG 页面，不经过工具、不落盘），
 登录好回终端按回车继续。登录态存在 `browser-profile/` 根目录。
 
@@ -133,7 +137,7 @@ npx playwright install chromium
 ## 日常运行
 
 ```bash
-node collector.js --keyword downjacket                       # 有 accounts.txt 且只有一个账号时自动用它
+node collector.js --keyword downjacket                       # 自动模式：优先自动读 cookies/ 文件夹里的会话文件
 node collector.js --keyword downjacket --account sample_small_a
 node collector.js --keyword "down jacket" --posts 10 --comments 30
 node collector.js --keyword luxurybags --manual               # 强制手动登录
@@ -176,16 +180,44 @@ npm test
 ```
 
 纯本地单测（黑名单、停止页检测、解析函数、accounts.txt 解析与秘密卫生、
-TOTP 的 RFC 6238 官方测试向量、会话文件转换与 0600 落盘往返），
+TOTP 的 RFC 6238 官方测试向量、会话文件转换与 0600 落盘往返、
+cookies 文件夹自动扫描与秘密卫生），
 不联网、不登录、不开浏览器。
 
 ## 一键启动（不用敲命令）
 
-把卖家给的 cookie 文件改名成 `cookies.txt`，放进本文件夹（跟启动文件放一起），然后双击：
+把卖家给的 cookie 文件放进 **`cookies/` 文件夹**（**文件名随便，不用改名**，
+比如就叫 `1234` 也行，扩展名有无都行），然后双击：
 
 - Windows：`Start-Windows.bat`
 - Mac：`Start-Mac.command`
 
-第一次双击会自动装依赖和浏览器内核（只需一次）。之后每次会问一句关键词，直接回车就是 `downjacket`，想搜别的就输别的（连着的词，如 `downjacket`、`handbag`）。没有 cookie 文件时，它会退到用 `accounts.txt` 登录（问你用哪个用户名）。结果在 `out/` 文件夹里。
+第一次双击会自动装依赖和浏览器内核（只需一次）。之后每次会问一句关键词，
+直接回车就是 `downjacket`，想搜别的就输别的（连着的词，如 `downjacket`、
+`handbag`）。启动文件只是帮你敲一句命令，真正挑文件、验登录的是脚本的
+自动模式（见下一节）。结果在 `out/` 文件夹里。
 
-注意：`cookies.txt` / `cookies.json` 已加入 .gitignore，不会被 git 提交，但也别手动发给任何人，文件就是账号钥匙。
+注意：`cookies/` 文件夹里除说明文件外的所有文件都已被 .gitignore 排除，
+不会被 git 提交；但文件就是账号钥匙，也别手动发给任何人。
+
+## 自动模式（默认，只给 --keyword 时）
+
+直接跑 `node collector.js --keyword downjacket`、不指定任何登录方式时，
+走自动模式，按下面顺序找登录来源：
+
+1. **`cookies/` 文件夹**：里面的卖家 cookie 文件（文件名任意、扩展名任意
+   或没有扩展名）按文件名排序，在**登录核验阶段**逐个试：打开 IG 能确认
+   登录的是哪个号，就用那个号跑完整程；会话失效（session_expired）的报
+   一下文件名、换下一个。**回退只发生在登录核验阶段**——一旦开始采集就
+   不再换号。核验出的账号命中主号黑名单（`nataliem.jordan` /
+   `mm8989221` / `lvlong2026`）照样立即中止整个运行（退出码 2），不会
+   拿主号去试下一个。候选全部失效时按 `session_expired` 停下，并列出
+   逐个试过的文件名。读不出 / 没有 sessionid 的文件会被跳过并报文件名。
+2. **根目录 `cookies.txt` / `cookies.json`**（旧一键启动的放法，仍然认）。
+3. **`accounts.txt`**：里面只有一个账号时自动用它；多个账号不会自己挑，
+   会列出用户名让你用 `--account` 指定（退出码 1）。
+
+以上都没有时，脚本打印用法并退出（退出码 1），不会自己乱登。显式参数永远
+优先于自动模式：`--account`、`--manual`、`--import-session`、
+`--import-cookies` 给了哪个就走哪个。扫描目录可用 `--cookies-dir <目录>`
+更改（默认 `./cookies`）。

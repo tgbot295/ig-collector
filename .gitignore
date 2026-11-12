@@ -3,12 +3,16 @@
 browser-profile/
 out/
 node_modules/
-# accounts.txt
+# accounts.txt 里是账号密码和 TOTP 密钥，同样绝不能提交/分享/上传。
+accounts.txt
 # cookies.txt / cookies.json 是卖家给的会话文件（文件 = 账号钥匙），同样绝不能提交/分享/上传。
 cookies.txt
 cookies.json
-.setup-done 里是账号密码和 TOTP 密钥，同样绝不能提交/分享/上传。
-accounts.txt
+.setup-done
+# cookies/ 文件夹：卖家给的 cookie 文件（文件名任意）放这里，脚本自动读取。
+# 里面的文件 = 账号钥匙，整夹不进仓库，只保留说明文件。
+cookies/*
+!cookies/README-放这里.md
 # sessions/ 里的 .storage.json 是导出的登录会话（文件 = 账号钥匙，等同 TG 的 .session），
 # 只留在本机，绝不能提交/分享/上传/发聊天。
 sessions/
