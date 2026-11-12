@@ -1,0 +1,6 @@
+<!doctype html>
+<html><head><title>Sample Down Shop on Instagram</title></head>
+<body>
+<div id="react-root"></div>
+<script type="application/json" data-content-len="999">{"require":[["ScheduledServerJS","handle",null,[{"data":{"xdt_shortcode_media":{"id":"3000000000000000001","shortcode":"FIXTURE001","is_video":false,"display_url":"https://example.invalid/fixture.jpg","taken_at_timestamp":1731340800,"owner":{"username":"sample_down_shop","full_name":"Sample Down Shop"},"edge_media_to_caption":{"edges":[{"node":{"text":"New down jacket in stock #downjacket #winter - DM to order"}}]},"edge_media_preview_like":{"count":321},"edge_media_to_parent_comment":{"count":2,"edges":[{"node":{"id":"17850000000000001","text":"How much is it? How to buy?","created_at":1731344400,"owner":{"username":"buyer_anna"},"edge_liked_by":{"count":3}}},{"node":{"id":"17850000000000002","text":"Do you ship to Canada?","created_at":1731348000,"owner":{"username":"maple_mike"},"edge_liked_by":{"count":1}}}]}}}}}]]}</script>
+</body></html>

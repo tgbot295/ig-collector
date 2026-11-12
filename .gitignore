@@ -1,0 +1,11 @@
+# 警告：browser-profile/ 里是专用小号的登录会话（等于登录凭证），
+# 只留在本机，绝不能分享、上传网盘或发给任何人。
+browser-profile/
+out/
+node_modules/
+# accounts.txt 里是账号密码和 TOTP 密钥，同样绝不能提交/分享/上传。
+accounts.txt
+# sessions/ 里的 .storage.json 是导出的登录会话（文件 = 账号钥匙，等同 TG 的 .session），
+# 只留在本机，绝不能提交/分享/上传/发聊天。
+sessions/
+*.storage.json

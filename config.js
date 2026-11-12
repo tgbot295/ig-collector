@@ -1,0 +1,43 @@
+'use strict';
+// 本地采集引擎配置：限速、限量、黑名单全部写死在这里，不提供关掉的开关。
+const path = require('path');
+const { DEFAULT_BLOCKLIST } = require('./src/guard');
+
+module.exports = {
+  baseUrl: 'https://www.instagram.com',
+  // 关键词话题页（关键词会自动去掉 # 和空格，如 "down jacket" -> #downjacket）
+  tagsUrl: (keyword) =>
+    'https://www.instagram.com/explore/tags/' + encodeURIComponent(keyword) + '/',
+
+  // 持久登录态目录：只存在本机，含登录会话，绝不能分享/上传（见 README）
+  // 手动模式用 browser-profile/ 本身；账号模式用 browser-profile/<用户名>/ 各自独立
+  profileDir: path.join(__dirname, 'browser-profile'),
+  profileDirFor: (username) =>
+    path.join(__dirname, 'browser-profile',
+      String(username || '').trim().replace(/^@+/, '').toLowerCase()),
+  outDir: path.join(__dirname, 'out'),
+
+  // 会话文件目录：登录成功导出的 <用户名>.storage.json 存这里（等同 TG 的 .session，
+  // 是账号钥匙，只放本机，绝不能分享/上传/发聊天，见 sessions/README-警告.md）
+  sessionsDir: path.join(__dirname, 'sessions'),
+
+  // 账号文件（只放本机，含密码，绝不能分享/上传/发聊天）
+  accountsFile: path.join(__dirname, 'accounts.txt'),
+
+  // 主号黑名单：登录账号命中立即中止（写死）
+  blocklist: DEFAULT_BLOCKLIST,
+
+  limits: {
+    postsDefault: 20,
+    postsMax: 50,        // 单次帖子硬上限
+    commentsDefault: 50, // 每帖评论默认上限
+    commentsMax: 200,
+    scrollRoundsMax: 15, // 话题页最多滚动轮数
+  },
+
+  // 人类节奏：主要动作之间随机停 3–6 秒（写死）
+  delays: { minMs: 3000, maxMs: 6000 },
+
+  navTimeoutMs: 45000,
+  actionTimeoutMs: 30000,
+};
