@@ -311,4 +311,40 @@ ok('dom: mergeComments dedupe, order and cap', () => {
   assert.strictEqual(extractDom.mergeComments([mk('a', 'x'), mk('b', 'y'), mk('c', 'z')], [], 2).length, 2);
 });
 
+// ---------- 发布时间：评论行之外的时间才是帖子的 ----------
+ok('dom: fixture A postDatetime null (times only inside rows), captionDatetime exposed', () => {
+  const { doc } = buildFixtureA();
+  const snap = withDoc(doc, () => extractDom.harvestPostDomInPage());
+  assert.strictEqual(snap.postDatetime, null); // 行内 time 是评论/文案时间，不在这里取
+  const dom = extractDom.analyzeSnapshot(snap, POST_URL_A, 50);
+  assert.strictEqual(dom.postDatetime, null);
+  // 文案行（第一行）的时间单独暴露，调用方确认作者后可当发帖时间兜底
+  assert.strictEqual(dom.captionDatetime, '2024-11-11T10:00:00.000Z');
+});
+
+ok('dom: standalone post date <time> outside comment rows is picked', () => {
+  const header = el('header');
+  header.append(el('a', { href: '/sample_down_shop/' }, 'sample_down_shop'));
+  const box = scrollableBox([
+    commentLi('sample_down_shop', 'New down jacket #downjacket', '2024-11-11T10:00:00.000Z', '1d'),
+    commentLi('buyer_anna', 'How much is it?', '2024-11-11T13:00:00.000Z', '3h'),
+  ]);
+  const dateDiv = el('div');
+  const dateA = el('a', { href: '/p/FIXTUREDOM4/' });
+  dateA.append(el('time', { datetime: '2024-11-11T10:00:00.000Z' }, 'November 11, 2024'));
+  dateDiv.append(dateA);
+  const rightCol = el('div');
+  rightCol.append(header, box, dateDiv);
+  const article = el('article');
+  article.append(el('div'), rightCol);
+  const main = el('main');
+  main.append(article);
+  const doc = makeDoc([navWithProfile('collector_small'), main], 'Sample Down Shop on Instagram');
+  const snap = withDoc(doc, () => extractDom.harvestPostDomInPage());
+  // 取的是行外那枚帖子日期，不是某条评论的时间（13:00 那枚在评论行里）
+  assert.strictEqual(snap.postDatetime, '2024-11-11T10:00:00.000Z');
+  const dom = extractDom.analyzeSnapshot(snap, 'https://www.instagram.com/p/FIXTUREDOM4/', 50);
+  assert.strictEqual(dom.postDatetime, '2024-11-11T10:00:00.000Z');
+});
+
 console.log('DOM 提取单测全部通过：' + passed + ' 项');

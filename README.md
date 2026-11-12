@@ -176,13 +176,45 @@ node collector.js --keyword downjacket --browser chrome
 node collector.js --keyword downjacket                       # 自动模式：优先自动读 cookies/ 文件夹里的会话文件
 node collector.js --keyword downjacket --account sample_small_a
 node collector.js --keyword "down jacket" --posts 10 --comments 30
+node collector.js --keyword downjacket --max-age-days 90     # 只采最近 90 天的帖子
+node collector.js --keyword downjacket --keep-all --no-merchant-filter  # 关掉两道筛选，全采
 node collector.js --keyword luxurybags --manual               # 强制手动登录
 node collector.js --help                                      # 看用法
 ```
 
 流程：确认登录（复用登录态或自动/手动登录）→ 打开话题页 → 滚动收集帖子
-链接 → 逐条打开帖子 → 提取发帖人、文案、话题标签、点赞/评论数 → 展开评论区
-读取评论人、评论内容、时间 → 保存。
+链接 → 逐条打开帖子 → 提取发帖人、文案、话题标签、点赞/评论数 → 过三道
+筛选（见下）→ 展开评论区读取评论人、评论内容、时间 → 保存。
+
+### 采集时的三道筛选（默认全开）
+
+逐条打开帖子后、读评论之前，帖子要先过两道筛；评论读完后还要过第三道：
+
+1. **新鲜度**：只采最近发布帖子。发布时间优先取页面内嵌数据的 taken_at，
+   其次取页面上帖子自己的日期，再不行用文案行的时间；都读不到就照常采
+   （结果里标 `timestampSource: "unknown"`，不编造时间）。超过上限的帖子
+   在读评论之前整帖跳过并计数（`stats.postsSkippedOld`），省时间。
+   - `--max-age-days N`：上限天数，**默认 365**；`0` = 不限。
+   - 每条保留的帖子都带 `timestamp`（ISO 时间）和 `timestampSource`
+     （`"json"` / `"dom"` / `"unknown"`）。
+2. **商家帖**：只采卖家商品帖。看文案有没有售卖信号：price、$、¥、
+   DM to order、私信、shop / store、商店 / 店铺、WhatsApp / wa.me、
+   link in bio、购买 / 下单 / 订购、批发 / wholesale、sale / 出售等
+   （与本地版工具的商家信号表对齐，另外不用单个“店”字判断，
+   免得“咖啡店”这类路人帖误中）。没有信号的路人帖跳过、不采评论、
+   不进结果（`stats.postsSkippedNonMerchant`）。
+   - 命中的信号会写在帖子条目的 `merchantSignals` 里，下游可直接复用。
+   - `--no-merchant-filter`：关掉这道筛，什么帖都采。
+3. **评论意向预筛**：读到的评论先按意向词分类（问购买 / 问价格 /
+   问运费 / 问尺码，中英双语词表与本地版工具完全一致），**默认只把带
+   意向的评论写进结果**，每条保留评论带 `intentTypes`（命中的类别）；
+   没意向的只计数不存。`stats.commentsSeen` 是读到的评论总数，
+   `stats.commentsKeptIntent` 是其中带意向的条数，逐帖输出和结尾汇总
+   都会报这两个数。
+   - `--keep-all`：关掉这道筛，评论全部保留（`intentTypes` 照样标注）。
+   - 兼容性：本地版分析工具是从结果的 `latestComments` 重新推导意向
+     线索的，预筛后保留下来的正好全是意向评论，导入分析的口径不变，
+     只是结果文件更小、更聚焦。
 
 ## 结果在哪
 
@@ -217,7 +249,8 @@ npm test
 
 纯本地单测（黑名单、停止页检测、解析函数、accounts.txt 解析与秘密卫生、
 TOTP 的 RFC 6238 官方测试向量、会话文件转换与 0600 落盘往返、
-cookies 文件夹自动扫描与秘密卫生、浏览器启动顺序与回退策略），
+cookies 文件夹自动扫描与秘密卫生、浏览器启动顺序与回退策略、
+三道采集筛选的新鲜度判定 / 商家信号 / 意向分类），
 不联网、不登录、不开真浏览器。
 
 ## 一键启动（不用敲命令）

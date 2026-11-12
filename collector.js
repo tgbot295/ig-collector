@@ -20,6 +20,8 @@ const { generateTotp } = require('./src/totp');
 const sessionStore = require('./src/session');
 const cookiesDir = require('./src/cookiesDir');
 const browserLaunch = require('./src/browserLaunch');
+const filters = require('./src/filters');
+const intent = require('./src/intent');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const randInt = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
@@ -36,6 +38,13 @@ console.log([
 ' --keyword 必填。话题关键词，如 downjacket（可带空格/#，会自动处理成话题名）',
 ' --posts 本次最多采多少条帖子，默认 20，硬上限 50',
 ' --comments 每条帖子最多读多少条评论，默认 50',
+' --max-age-days N 只采最近 N 天内发布的帖子，默认 365；0 = 不限。',
+'    太旧的帖子在读评论之前就跳过（省时间）；发布时间读不到的照常采。',
+' --keep-all 关掉评论意向预筛。默认只保留带购买意向的评论（问购买/问价格/',
+'    问运费/问尺码），其余只计数不存；加这个参数则全部保留（意向类别照样标）。',
+' --no-merchant-filter 关掉商家帖筛选。默认只采文案带售卖信号的商家帖',
+'    （price/$/¥、DM to order、私信、shop/store、商店/店铺、WhatsApp、',
+'    link in bio、购买/下单/订购、批发、sale 等），路人帖跳过不采评论。',
 ' --headless 无头模式（仅调试/自测用；首次登录必须用有窗口模式手动登录）',
 ' --account <用户名> 用 accounts.txt 里这个账号自动登录（一次只跑一个账号）',
 ' --manual 强制手动登录模式（忽略 accounts.txt）',
@@ -77,13 +86,17 @@ return String(raw || '').replace(/^#+/, '').replace(/\s+/g, '').trim();
 }
 
 function parseArgs(argv) {
-const args = { keyword: '', posts: config.limits.postsDefault, comments: config.limits.commentsDefault, headless: false, help: false, account: '', manual: false, importSession: '', importCookies: '', cookiesDir: config.cookiesDir, browser: '', checkCookies: false };
+const args = { keyword: '', posts: config.limits.postsDefault, comments: config.limits.commentsDefault, headless: false, help: false, account: '', manual: false, importSession: '', importCookies: '', cookiesDir: config.cookiesDir, browser: '', checkCookies: false, maxAgeDays: 365, keepAll: false, noMerchantFilter: false };
 for (let i = 0; i < argv.length; i++) {
 const a = argv[i];
 if (a === '--help' || a === '-h') args.help = true;
 else if (a === '--check-cookies') args.checkCookies = true;
 else if (a === '--headless') args.headless = true;
 else if (a === '--manual') args.manual = true;
+else if (a === '--keep-all') args.keepAll = true;
+else if (a === '--no-merchant-filter') args.noMerchantFilter = true;
+else if (a === '--max-age-days') args.maxAgeDays = parseInt(argv[++i], 10);
+else if (a.startsWith('--max-age-days=')) args.maxAgeDays = parseInt(a.slice('--max-age-days='.length), 10);
 else if (a === '--import-session') args.importSession = String(argv[++i] || '').trim();
 else if (a.startsWith('--import-session=')) args.importSession = a.slice('--import-session='.length).trim();
 else if (a === '--import-cookies') args.importCookies = String(argv[++i] || '').trim();
@@ -106,6 +119,7 @@ if (!Number.isFinite(args.posts) || args.posts < 1) args.posts = config.limits.p
 args.posts = Math.min(args.posts, config.limits.postsMax);
 if (!Number.isFinite(args.comments) || args.comments < 1) args.comments = config.limits.commentsDefault;
 args.comments = Math.min(args.comments, config.limits.commentsMax);
+if (!Number.isFinite(args.maxAgeDays) || args.maxAgeDays < 0) args.maxAgeDays = 365;
 return args;
 }
 
@@ -581,6 +595,22 @@ if (post.commentsCount === null || post.commentsCount === undefined) post.commen
 if (!post.displayUrl && og.ogImage) post.displayUrl = og.ogImage;
 if (!post.url) post.url = link.url;
 if (!post.shortCode) post.shortCode = link.shortCode;
+// 发布时间解析（新鲜度筛选要用）：内嵌 JSON 的 taken_at 优先（post.timestamp
+// 已由 JSON 路径填好）；其次用 DOM 里评论行之外的帖子日期；再不行用文案行
+// 的时间（文案行作者已确认是帖主时，它的时间就是发帖时间）。都拿不到
+// 保持 null、来源标 unknown，照常采集，绝不编造时间。
+let timestampSource = 'unknown';
+if (post.timestamp) {
+timestampSource = 'json';
+} else if (dom && dom.postDatetime) {
+post.timestamp = dom.postDatetime;
+timestampSource = 'dom';
+} else if (dom && dom.captionDatetime && post.ownerUsername &&
+dom.captionAuthor === post.ownerUsername) {
+post.timestamp = dom.captionDatetime;
+timestampSource = 'dom';
+}
+post.timestampSource = timestampSource;
 return {
 post: post,
 payloadComments: (result && result.comments) || [],
@@ -828,13 +858,21 @@ account: null,
 loginMode: importMode || (autoCandidates ? 'auto-cookies' : (selected ? 'account-file' : 'manual')),
 postsFound: 0,
 postsCollected: 0,
+postsSkippedOld: 0,
+postsSkippedNonMerchant: 0,
 commentsCollected: 0,
+commentsSeen: 0,
+commentsKeptIntent: 0,
 stopped: null,
 stoppedLabel: '',
 },
 };
 const finish = (code) => {
 const file = saveOutput(output);
+const s = output.stats;
+console.log('汇总：帖子采集 ' + s.postsCollected + ' 条，跳过旧帖 ' + (s.postsSkippedOld || 0) +
+' 条，跳过非商家帖 ' + (s.postsSkippedNonMerchant || 0) + ' 条；评论共看到 ' +
+(s.commentsSeen || 0) + ' 条，意向评论保留 ' + (s.commentsKeptIntent || 0) + ' 条。');
 if (output.stats.stopped) {
 console.log('运行状态：' + JSON.stringify({ stopped: output.stats.stopped, label: output.stats.stoppedLabel, file: file}));
 } else {
@@ -1138,18 +1176,64 @@ stop = await checkStop(page);
 if (stop) { stopWith(stop.reason); break;}
 
 const data = await extractPostData(page, link);
+const post = data.post;
+
+// 筛选一：新鲜度。发布时间已知且超过 --max-age-days 的，在读评论之前
+// 整帖跳过（不进结果、省时间）；发布时间未知的照常采（已标 unknown）。
+const ageDecision = filters.decidePostAge({
+timestamp: post.timestamp, now: Date.now(), maxAgeDays: args.maxAgeDays,
+});
+if (ageDecision.action === 'skip') {
+output.stats.postsSkippedOld++;
+console.log('跳过旧帖 ' + link.shortCode + '：发布于 ' +
+String(post.timestamp).slice(0, 10) + '（超过 ' + args.maxAgeDays + ' 天）');
+await humanPause();
+continue;
+}
+if (!post.timestamp) {
+console.log('帖子 ' + link.shortCode + ' 发布时间未知，照常采集。');
+}
+
+// 筛选二：商家帖。文案没有任何售卖信号的路人帖跳过、不采评论、不进
+// 结果；命中的信号挂在帖子条目上（merchantSignals）供下游复用，
+// --no-merchant-filter 时不跳过但照样标注。
+const mSignals = filters.merchantSignalsOf(post.caption);
+if (!args.noMerchantFilter && mSignals.length === 0) {
+output.stats.postsSkippedNonMerchant++;
+console.log('跳过非商家帖 @' + (post.ownerUsername || '未知') + '（文案无售卖信号）');
+await humanPause();
+continue;
+}
+post.merchantSignals = mSignals;
+
 const cres = await collectPostComments(page, link, args.comments, data);
-const comments = cres.comments;
-data.post.latestComments = comments;
-if (extractDom.needsPostDebug(data.post, comments)) {
+const allComments = cres.comments;
+if (extractDom.needsPostDebug(post, allComments)) {
 await savePostDebugEvidence(page, link, i, cres.meta);
 }
-output.items.push(data.post);
+
+// 筛选三：评论意向预筛（默认开）。只有带购买意向的评论进结果，意向
+// 类别挂在每条保留评论的 intentTypes 上；没意向的只计数不存。
+// --keep-all 时全部保留（intentTypes 照样标）。下游分析工具从
+// latestComments 重新推导线索，保留下来的正好全是意向评论，兼容不变。
+const filtered = intent.filterCommentsByIntent(allComments, args.keepAll);
+const comments = filtered.kept;
+post.latestComments = comments;
+output.items.push(post);
 for (const c of comments) output.items.push(c);
 output.stats.postsCollected++;
 output.stats.commentsCollected += comments.length;
+output.stats.commentsSeen += filtered.seen;
+output.stats.commentsKeptIntent += filtered.intentCount;
+if (args.keepAll) {
 console.log('已采集帖子 ' + (i + 1) + '/' + links.length + '：@' +
-(data.post.ownerUsername || '未知') + '，评论 ' + comments.length + ' 条');
+(post.ownerUsername || '未知') + '，评论共 ' + filtered.seen +
+' 条（--keep-all 全部保留，其中意向 ' + filtered.intentCount + ' 条）');
+} else {
+console.log('已采集帖子 ' + (i + 1) + '/' + links.length + '：@' +
+(post.ownerUsername || '未知') + '，评论共 ' + filtered.seen +
+' 条，意向 ' + filtered.intentCount + ' 条');
+}
 await humanPause();
 }
 

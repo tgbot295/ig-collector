@@ -38,7 +38,9 @@ function usernameFromProfileHref(href) {
 // 把帖子页的可见结构读成快照：
 // { title, headerUsernames[], rows[{username, segments[], datetime}],
 //   counts{anchorsTotal, profileAnchors, commentRowCandidates},
-//   hasCommentsContainer, navProfileUsername }
+//   hasCommentsContainer, navProfileUsername, postDatetime }
+// postDatetime 是帖子自己的发布时间：评论行之外的第一枚 <time datetime>
+// （文案/页头区下方那枚日期）；评论行里的 time 是各条评论的时间，不算。
 // 同时把评论列容器记在 document.__igcCommentsEl 上，供滚动函数复用。
 function harvestPostDomInPage() {
   var doc = document;
@@ -154,8 +156,8 @@ function harvestPostDomInPage() {
   if (container) { try { doc.__igcCommentsEl = container; } catch (e) { /* 忽略 */ } }
 
   var rows = [];
+  var rowEls = container ? rowElementsIn(container) : [];
   if (container) {
-    var rowEls = rowElementsIn(container);
     for (var r = 0; r < rowEls.length; r++) {
       var rowEl = rowEls[r];
       var pas = profileAnchorsIn(rowEl);
@@ -193,10 +195,27 @@ function harvestPostDomInPage() {
     if (pre.length) headerUsernames = [pre[pre.length - 1]];
   }
 
+  // 帖子自己的发布时间：按页面顺序取第一枚不在评论行里的 <time datetime>。
+  // 评论行（含文案行）里的 time 是那条评论/文案的时间，不在这里取；
+  // 文案行的时间由 Node 侧在确认文案行作者=帖主后另行兜底（见 analyzeSnapshot
+  // 的 captionDatetime），因为文案行的时间在 IG 页面里就是发帖时间。
+  var postDatetime = null;
+  var timeEls = all(scope, 'time');
+  for (var ti = 0; ti < timeEls.length; ti++) {
+    var inRow = false;
+    for (var rj = 0; rj < rowEls.length; rj++) {
+      if (isWithin(timeEls[ti], rowEls[rj])) { inRow = true; break; }
+    }
+    if (inRow) continue;
+    var dtv = timeEls[ti].getAttribute('datetime');
+    if (dtv) { postDatetime = dtv; break; }
+  }
+
   return {
     title: doc.title || '',
     headerUsernames: headerUsernames,
     rows: rows,
+    postDatetime: postDatetime,
     counts: {
       anchorsTotal: all(doc, 'a').length,
       profileAnchors: profileAnchorsIn(scope).length,
@@ -349,6 +368,11 @@ function analyzeSnapshot(snapshot, postUrl, cap) {
     headerOwner: headerUsernames[0] || '',
     captionAuthor: first ? String(first.username || '') : '',
     captionText: first ? commentTextFromSegments(first.segments, first.username) : '',
+    // 发布时间候选（ISO 化，认不出保留原字符串、再不行给 null）：
+    // postDatetime = 评论行之外的帖子日期；captionDatetime = 文案行（第一行）
+    // 的时间——调用方确认文案行作者就是帖主后，可把它当发帖时间兜底。
+    postDatetime: snap.postDatetime ? (extract.toIso(snap.postDatetime) || snap.postDatetime) : null,
+    captionDatetime: first && first.datetime ? (extract.toIso(first.datetime) || first.datetime) : null,
     comments: rowsToComments(rows, postUrl, cap),
     rawRowCount: rows.length,
     counts: {
