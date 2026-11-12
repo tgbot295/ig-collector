@@ -178,3 +178,14 @@ npm test
 纯本地单测（黑名单、停止页检测、解析函数、accounts.txt 解析与秘密卫生、
 TOTP 的 RFC 6238 官方测试向量、会话文件转换与 0600 落盘往返），
 不联网、不登录、不开浏览器。
+
+## 一键启动（不用敲命令）
+
+把卖家给的 cookie 文件改名成 `cookies.txt`，放进本文件夹（跟启动文件放一起），然后双击：
+
+- Windows：`Start-Windows.bat`
+- Mac：`Start-Mac.command`
+
+第一次双击会自动装依赖和浏览器内核（只需一次）。之后每次会问一句关键词，直接回车就是 `downjacket`，想搜别的就输别的（连着的词，如 `downjacket`、`handbag`）。没有 cookie 文件时，它会退到用 `accounts.txt` 登录（问你用哪个用户名）。结果在 `out/` 文件夹里。
+
+注意：`cookies.txt` / `cookies.json` 已加入 .gitignore，不会被 git 提交，但也别手动发给任何人，文件就是账号钥匙。
