@@ -22,6 +22,7 @@ const cookiesDir = require('./src/cookiesDir');
 const browserLaunch = require('./src/browserLaunch');
 const filters = require('./src/filters');
 const intent = require('./src/intent');
+const leadsOut = require('./src/leadsOut');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const randInt = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
@@ -270,7 +271,12 @@ fs.mkdirSync(config.outDir, { recursive: true});
 const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 const file = path.join(config.outDir, 'collect-' + output.keyword + '-' + ts + '.json');
 fs.writeFileSync(file, JSON.stringify(output, null, 2), 'utf8');
-return file;
+// 最终交付物：两列客户名单 CSV（只有 用户链接 + 评论内容），与主 JSON
+// 用同一时间戳同名对应。主 JSON 是完整记录，保持原样不动。
+const rows = leadsOut.buildLeadsRows(output.items);
+const leadsFile = path.join(config.outDir, 'leads-' + output.keyword + '-' + ts + '.csv');
+fs.writeFileSync(leadsFile, leadsOut.toCsv(rows), 'utf8');
+return { file: file, leadsFile: leadsFile, leadsCount: rows.length };
 }
 
 // 尽力识别当前登录的用户名：先走页面自己的 current_user 接口，再退回头像 alt 文本
@@ -868,7 +874,8 @@ stoppedLabel: '',
 },
 };
 const finish = (code) => {
-const file = saveOutput(output);
+const saved = saveOutput(output);
+const file = saved.file;
 const s = output.stats;
 console.log('汇总：帖子采集 ' + s.postsCollected + ' 条，跳过旧帖 ' + (s.postsSkippedOld || 0) +
 ' 条，跳过非商家帖 ' + (s.postsSkippedNonMerchant || 0) + ' 条；评论共看到 ' +
@@ -879,6 +886,7 @@ console.log('运行状态：' + JSON.stringify({ stopped: output.stats.stopped, 
 console.log('运行状态：' + JSON.stringify({ stopped: null, label: '采集完成', file: file}));
 }
 console.log('结果已保存：' + file);
+console.log('客户名单：共 ' + saved.leadsCount + ' 条 → ' + saved.leadsFile + '（只有两列：用户链接、评论内容）');
 return code;
 };
 const stopWith = (reason) => {
