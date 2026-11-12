@@ -18,6 +18,7 @@ const accounts = require('./src/accounts');
 const { generateTotp } = require('./src/totp');
 const sessionStore = require('./src/session');
 const cookiesDir = require('./src/cookiesDir');
+const browserLaunch = require('./src/browserLaunch');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const randInt = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
@@ -40,6 +41,10 @@ console.log([
 ' --import-session <文件> 用会话文件直登（本工具导出的 .storage.json，类似 TG 的 .session）',
 ' --import-cookies <文件> 用 cookie 的 JSON 直登（数组或 {cookies:[...]} 都行，关键看 sessionid）',
 ' --cookies-dir <目录> 自动模式扫描的 cookie 文件夹，默认 ./cookies',
+' --browser <chrome|msedge|chromium> 强制只用某个浏览器；不给时依次试本机',
+'    Google Chrome、Microsoft Edge、Playwright 自带 Chromium。也可用环境',
+'    变量 IG_COLLECTOR_BROWSER 指定（--browser 优先）。推荐用本机 Chrome：',
+'    自带 Chromium 的下载源在部分地区被墙（403），装不上。',
 ' --help 显示本说明',
 '',
 '自动模式（默认）：只给 --keyword、不给任何登录参数时，脚本按顺序自动找',
@@ -66,7 +71,7 @@ return String(raw || '').replace(/^#+/, '').replace(/\s+/g, '').trim();
 }
 
 function parseArgs(argv) {
-const args = { keyword: '', posts: config.limits.postsDefault, comments: config.limits.commentsDefault, headless: false, help: false, account: '', manual: false, importSession: '', importCookies: '', cookiesDir: config.cookiesDir };
+const args = { keyword: '', posts: config.limits.postsDefault, comments: config.limits.commentsDefault, headless: false, help: false, account: '', manual: false, importSession: '', importCookies: '', cookiesDir: config.cookiesDir, browser: '' };
 for (let i = 0; i < argv.length; i++) {
 const a = argv[i];
 if (a === '--help' || a === '-h') args.help = true;
@@ -78,6 +83,8 @@ else if (a === '--import-cookies') args.importCookies = String(argv[++i] || '').
 else if (a.startsWith('--import-cookies=')) args.importCookies = a.slice('--import-cookies='.length).trim();
 else if (a === '--cookies-dir') args.cookiesDir = String(argv[++i] || '').trim() || config.cookiesDir;
 else if (a.startsWith('--cookies-dir=')) args.cookiesDir = a.slice('--cookies-dir='.length).trim() || config.cookiesDir;
+else if (a === '--browser') args.browser = String(argv[++i] || '').trim().toLowerCase();
+else if (a.startsWith('--browser=')) args.browser = a.slice('--browser='.length).trim().toLowerCase();
 else if (a === '--account') args.account = String(argv[++i] || '').trim();
 else if (a.startsWith('--account=')) args.account = a.slice('--account='.length).trim();
 else if (a === '--keyword') args.keyword = cleanKeyword(argv[++i] || '');
@@ -87,6 +94,7 @@ else if (a.startsWith('--keyword=')) args.keyword = cleanKeyword(a.slice('--keyw
 else if (a.startsWith('--posts=')) args.posts = parseInt(a.slice('--posts='.length), 10);
 else if (a.startsWith('--comments=')) args.comments = parseInt(a.slice('--comments='.length), 10);
 }
+if (!args.browser) args.browser = String(process.env.IG_COLLECTOR_BROWSER || '').trim().toLowerCase();
 if (!Number.isFinite(args.posts) || args.posts < 1) args.posts = config.limits.postsDefault;
 args.posts = Math.min(args.posts, config.limits.postsMax);
 if (!Number.isFinite(args.comments) || args.comments < 1) args.comments = config.limits.commentsDefault;
@@ -390,6 +398,10 @@ if (args.help ||!args.keyword) {
 printUsage();
 return 0;
 }
+if (args.browser && !browserLaunch.isValidChoice(args.browser)) {
+console.log('错误：--browser 只能是 chrome / msedge / chromium（或用环境变量 IG_COLLECTOR_BROWSER），你给的是：' + args.browser);
+return 1;
+}
 
 // ---- 启动检查：out/ 里若混进 accounts.txt，警告并忽略（只认 collector 根目录的）----
 if (fs.existsSync(path.join(config.outDir, 'accounts.txt'))) {
@@ -534,7 +546,7 @@ let chromium;
 try {
 chromium = require('playwright').chromium;
 } catch (e) {
-console.log('未找到 Playwright。请先在 collector 目录里运行：npm install，然后运行：npx playwright install chromium');
+console.log('未找到 Playwright 库。请先在 collector 目录里运行：npm install（浏览器用本机现成的 Chrome / Edge，不用再单独下载内核）');
 stopWith('playwright_missing');
 return finish(1);
 }
@@ -542,24 +554,35 @@ return finish(1);
 let context = null;
 let browser = null;
 try {
+// 所有启动都走同一个策略：本机 Chrome → 本机 Edge → 自带 Chromium
+// （--browser / IG_COLLECTOR_BROWSER 给了就只试那一个）。自带 Chromium 的
+// 下载源在部分地区被墙，所以现成浏览器优先；某个候选起不来只跳过试下一个，
+// 不打印它的报错堆栈。成功后只报一行实际用的浏览器。
+if (importMode || autoCandidates) {
+const launched = await browserLaunch.tryLaunch(
+(cand) => chromium.launch(browserLaunch.withChannel({ headless: args.headless }, cand)),
+args.browser || null);
+browser = launched.result;
+console.log('浏览器：' + launched.candidate.label);
 if (importMode) {
-browser = await chromium.launch({ headless: args.headless });
 context = await browser.newContext({
 storageState: importState,
 viewport: { width: 1280, height: 900},
 });
-} else if (autoCandidates) {
-browser = await chromium.launch({ headless: args.headless });
-// context 在登录核验阶段按候选逐个创建（见下面），这里先不建
+}
+// autoCandidates 时 context 在登录核验阶段按候选逐个创建（见下面），这里先不建
 } else {
-context = await chromium.launchPersistentContext(profileDir, {
+const launched = await browserLaunch.tryLaunch(
+(cand) => chromium.launchPersistentContext(profileDir, browserLaunch.withChannel({
 headless: args.headless,
 viewport: { width: 1280, height: 900},
-});
+}, cand)),
+args.browser || null);
+context = launched.result;
+console.log('浏览器：' + launched.candidate.label);
 }
 } catch (e) {
-console.log('浏览器启动失败：' + (e && e.message? e.message.split('\n')[0]: e));
-console.log('如果提示缺少浏览器内核，请先运行：npx playwright install chromium');
+console.log('没找到能用的浏览器：请装 Google Chrome（或确认 Edge 在），装好后重跑。');
 stopWith('browser_launch_failed');
 return finish(1);
 }

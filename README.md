@@ -124,15 +124,37 @@ node collector.js --keyword downjacket --manual
 
 ## 安装（Windows / Mac 通用）
 
-需要先装好 Node.js（LTS 版）。然后在本文件夹打开终端（Windows 用 PowerShell，
-Mac 用“终端”），依次运行：
+需要先装好 Node.js（LTS 版），并且**电脑上装有 Google Chrome（推荐）或
+Microsoft Edge（Windows 自带，一般不用另装）**。脚本直接用你电脑上现成
+的浏览器，不再另外下载浏览器内核。
+
+> 为什么不下载自带内核了：Playwright 的 Chromium 内核走
+> cdn.playwright.dev 下载，这个 CDN 在部分地区被墙（403 AccessDenied，
+> "not available in your location"），根本装不上，所以改用本机 Chrome。
+
+然后在本文件夹打开终端（Windows 用 PowerShell，Mac 用“终端”），运行：
 
 ```bash
 npm install
-npx playwright install chromium
 ```
 
-第一条装脚本依赖，第二条下载脚本专用的 Chromium 浏览器（只下这一次，约几百 MB）。
+这一条装脚本依赖（Playwright 库本身），只装这一次。
+
+### 用哪个浏览器
+
+启动时按顺序自动试：**本机 Google Chrome → 本机 Microsoft Edge →
+Playwright 自带 Chromium**，哪个能起来用哪个，控制台会打一行
+`浏览器：本机 Google Chrome` 之类的提示。三个都起不来才会停，并提示
+先装 Chrome。
+
+想强制只用某一个时：
+
+```bash
+node collector.js --keyword downjacket --browser chrome
+```
+
+`--browser` 可选 `chrome` / `msedge` / `chromium`；也可以设环境变量
+`IG_COLLECTOR_BROWSER`（命令行参数优先于环境变量）。
 
 ## 日常运行
 
@@ -181,8 +203,8 @@ npm test
 
 纯本地单测（黑名单、停止页检测、解析函数、accounts.txt 解析与秘密卫生、
 TOTP 的 RFC 6238 官方测试向量、会话文件转换与 0600 落盘往返、
-cookies 文件夹自动扫描与秘密卫生），
-不联网、不登录、不开浏览器。
+cookies 文件夹自动扫描与秘密卫生、浏览器启动顺序与回退策略），
+不联网、不登录、不开真浏览器。
 
 ## 一键启动（不用敲命令）
 
@@ -192,7 +214,8 @@ cookies 文件夹自动扫描与秘密卫生），
 - Windows：`Start-Windows.bat`
 - Mac：`Start-Mac.command`
 
-第一次双击会自动装依赖和浏览器内核（只需一次）。之后每次会问一句关键词，
+第一次双击会自动装依赖（只需一次；浏览器用本机现成的 Chrome / Edge，
+不另外下载，两个都没装时会先提醒你装 Chrome）。之后每次会问一句关键词，
 直接回车就是 `downjacket`，想搜别的就输别的（连着的词，如 `downjacket`、
 `handbag`）。启动文件只是帮你敲一句命令，真正挑文件、验登录的是脚本的
 自动模式（见下一节）。结果在 `out/` 文件夹里。

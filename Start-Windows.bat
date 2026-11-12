@@ -17,11 +17,19 @@ if not exist node_modules (
   if errorlevel 1 ( echo 依赖安装失败，把上面的红字截图发出来。 & pause & exit /b 1 )
 )
 
-if not exist .setup-done (
-  echo 第一次运行：正在安装浏览器内核，要下载一两百兆，等它跑完...
-  call npx playwright install chromium
-  if errorlevel 1 ( echo 浏览器内核安装失败，把上面的红字截图发出来。 & pause & exit /b 1 )
-  echo ok> .setup-done
+rem 浏览器用本机现成的 Chrome / Edge，不再另外下载内核
+rem （Playwright 自带 Chromium 的下载源在国内会被墙，403 装不上）。
+rem 这里只做软检查：两个都没装才拦下来提醒。
+set BROWSER_FOUND=
+if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" set BROWSER_FOUND=1
+if exist "%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe" set BROWSER_FOUND=1
+if exist "%LocalAppData%\Google\Chrome\Application\chrome.exe" set BROWSER_FOUND=1
+if exist "%ProgramFiles%\Microsoft\Edge\Application\msedge.exe" set BROWSER_FOUND=1
+if exist "%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe" set BROWSER_FOUND=1
+if not defined BROWSER_FOUND (
+  echo 先装一个 Google Chrome，这个脚本用你电脑上现成的浏览器，不再另外下载。
+  pause
+  exit /b 1
 )
 
 set KEYWORD=downjacket

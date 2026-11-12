@@ -12,10 +12,13 @@ if [ ! -d node_modules ]; then
   npm install || { echo "依赖安装失败，把上面的红字截图发出来。"; read -r -p "按回车关闭..." _; exit 1; }
 fi
 
-if [ ! -f .setup-done ]; then
-  echo "第一次运行：正在安装浏览器内核，要下载一两百兆，等它跑完..."
-  npx playwright install chromium || { echo "浏览器内核安装失败，把上面的红字截图发出来。"; read -r -p "按回车关闭..." _; exit 1; }
-  echo ok > .setup-done
+# 浏览器用本机现成的 Chrome / Edge，不再另外下载内核
+# （Playwright 自带 Chromium 的下载源在国内会被墙，403 装不上）。
+# 只做软检查：两个都没装才拦下来提醒。
+if [ ! -d "/Applications/Google Chrome.app" ] && [ ! -d "/Applications/Microsoft Edge.app" ]; then
+  echo "先装一个 Google Chrome，这个脚本用你电脑上现成的浏览器，不再另外下载。"
+  read -r -p "按回车关闭..." _
+  exit 1
 fi
 
 read -r -p "输入关键词（直接回车就用 downjacket）：" KEYWORD
