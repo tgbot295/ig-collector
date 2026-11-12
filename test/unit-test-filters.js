@@ -152,4 +152,21 @@ ok('passerby: 咖啡店 does not false-positive on 店', () => {
   assert.deepStrictEqual(filters.merchantSignalsOf('周末去书店逛了一下午'), []);
 });
 
+// ---------- 商家筛选开关接线（collector.parseArgs） ----------
+// 用户 2026-11-12 拍板：商家筛选默认关，只要有评论且有意向评论就采；
+// --merchant-filter 才打开；旧的 --no-merchant-filter 保留为无操作。
+const { parseArgs } = require('../collector');
+ok('wiring: merchant filter defaults OFF', () => {
+  const a = parseArgs(['--keyword', 'downjacket']);
+  assert.strictEqual(a.merchantFilter, false);
+});
+ok('wiring: --merchant-filter turns it ON', () => {
+  const a = parseArgs(['--keyword', 'downjacket', '--merchant-filter']);
+  assert.strictEqual(a.merchantFilter, true);
+});
+ok('wiring: --no-merchant-filter is a harmless no-op (stays OFF)', () => {
+  const a = parseArgs(['--keyword', 'downjacket', '--no-merchant-filter']);
+  assert.strictEqual(a.merchantFilter, false);
+});
+
 console.log('筛选单测全部通过：' + passed + ' 项');

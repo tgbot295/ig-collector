@@ -177,18 +177,19 @@ node collector.js --keyword downjacket                       # 自动模式：�
 node collector.js --keyword downjacket --account sample_small_a
 node collector.js --keyword "down jacket" --posts 10 --comments 30
 node collector.js --keyword downjacket --max-age-days 90     # 只采最近 90 天的帖子
-node collector.js --keyword downjacket --keep-all --no-merchant-filter  # 关掉两道筛选，全采
+node collector.js --keyword downjacket --keep-all            # 关掉意向预筛，评论全采
+node collector.js --keyword downjacket --merchant-filter     # 打开商家筛选（默认关），只采文案带售卖信号的帖
 node collector.js --keyword luxurybags --manual               # 强制手动登录
 node collector.js --help                                      # 看用法
 ```
 
 流程：确认登录（复用登录态或自动/手动登录）→ 打开话题页 → 滚动收集帖子
-链接 → 逐条打开帖子 → 提取发帖人、文案、话题标签、点赞/评论数 → 过三道
-筛选（见下）→ 展开评论区读取评论人、评论内容、时间 → 保存。
+链接 → 逐条打开帖子 → 提取发帖人、文案、话题标签、点赞/评论数 → 过筛选
+（见下）→ 展开评论区读取评论人、评论内容、时间 → 保存。
 
-### 采集时的三道筛选（默认全开）
+### 采集时的三道筛选（时间、意向默认开；商家默认关）
 
-逐条打开帖子后、读评论之前，帖子要先过两道筛；评论读完后还要过第三道：
+逐条打开帖子后、读评论之前，帖子要先过帖子级筛选；评论读完后还要过意向预筛：
 
 1. **新鲜度**：只采最近发布帖子。发布时间优先取页面内嵌数据的 taken_at，
    其次取页面上帖子自己的日期，再不行用文案行的时间；都读不到就照常采
@@ -197,14 +198,18 @@ node collector.js --help                                      # 看用法
    - `--max-age-days N`：上限天数，**默认 365**；`0` = 不限。
    - 每条保留的帖子都带 `timestamp`（ISO 时间）和 `timestampSource`
      （`"json"` / `"dom"` / `"unknown"`）。
-2. **商家帖**：只采卖家商品帖。看文案有没有售卖信号：price、$、¥、
-   DM to order、私信、shop / store、商店 / 店铺、WhatsApp / wa.me、
-   link in bio、购买 / 下单 / 订购、批发 / wholesale、sale / 出售等
-   （与本地版工具的商家信号表对齐，另外不用单个“店”字判断，
-   免得“咖啡店”这类路人帖误中）。没有信号的路人帖跳过、不采评论、
-   不进结果（`stats.postsSkippedNonMerchant`）。
-   - 命中的信号会写在帖子条目的 `merchantSignals` 里，下游可直接复用。
-   - `--no-merchant-filter`：关掉这道筛，什么帖都采。
+2. **商家帖（默认关）**：默认不按商家过滤——只要帖子有评论、且评里
+   有意向评论，就采集。文案有没有售卖信号只照常计算并写在帖子条目的
+   `merchantSignals` 里供下游参考，不拦任何帖，
+   `stats.postsSkippedNonMerchant` 恒为 0。
+   - `--merchant-filter`：显式打开这道筛，打开后才只采卖家商品帖。
+     判定看文案售卖信号：price、$、¥、DM to order、私信、shop / store、
+     商店 / 店铺、WhatsApp / wa.me、link in bio、购买 / 下单 / 订购、
+     批发 / wholesale、sale / 出售等（与本地版工具的商家信号表对齐，
+     另外不用单个“店”字判断，免得“咖啡店”这类路人帖误中）。
+     没有信号的路人帖跳过、不采评论、不进结果
+     （`stats.postsSkippedNonMerchant`）。
+   - `--no-merchant-filter` 是旧参数，现为无操作（商家筛选默认就是关的）。
 3. **评论意向预筛**：读到的评论先按意向词分类（问购买 / 问价格 /
    问运费 / 问尺码，中英双语词表与本地版工具完全一致），**默认只把带
    意向的评论写进结果**，每条保留评论带 `intentTypes`（命中的类别）；

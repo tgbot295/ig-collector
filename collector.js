@@ -43,9 +43,11 @@ console.log([
 '    太旧的帖子在读评论之前就跳过（省时间）；发布时间读不到的照常采。',
 ' --keep-all 关掉评论意向预筛。默认只保留带购买意向的评论（问购买/问价格/',
 '    问运费/问尺码），其余只计数不存；加这个参数则全部保留（意向类别照样标）。',
-' --no-merchant-filter 关掉商家帖筛选。默认只采文案带售卖信号的商家帖',
-'    （price/$/¥、DM to order、私信、shop/store、商店/店铺、WhatsApp、',
-'    link in bio、购买/下单/订购、批发、sale 等），路人帖跳过不采评论。',
+' --merchant-filter 打开商家帖筛选（默认关）。打开后只采文案带售卖信号的',
+'    商家帖（price/$/¥、DM to order、私信、shop/store、商店/店铺、WhatsApp、',
+'    link in bio、购买/下单/订购、批发、sale 等），路人帖跳过不采评论；',
+'    不加这个参数时什么帖都采（有评论且有意向评论的就收）。',
+'    --no-merchant-filter 是旧参数，现为无操作（商家筛选默认就是关的）。',
 ' --headless 无头模式（仅调试/自测用；首次登录必须用有窗口模式手动登录）',
 ' --account <用户名> 用 accounts.txt 里这个账号自动登录（一次只跑一个账号）',
 ' --manual 强制手动登录模式（忽略 accounts.txt）',
@@ -87,7 +89,7 @@ return String(raw || '').replace(/^#+/, '').replace(/\s+/g, '').trim();
 }
 
 function parseArgs(argv) {
-const args = { keyword: '', posts: config.limits.postsDefault, comments: config.limits.commentsDefault, headless: false, help: false, account: '', manual: false, importSession: '', importCookies: '', cookiesDir: config.cookiesDir, browser: '', checkCookies: false, maxAgeDays: 365, keepAll: false, noMerchantFilter: false };
+const args = { keyword: '', posts: config.limits.postsDefault, comments: config.limits.commentsDefault, headless: false, help: false, account: '', manual: false, importSession: '', importCookies: '', cookiesDir: config.cookiesDir, browser: '', checkCookies: false, maxAgeDays: 365, keepAll: false, merchantFilter: false };
 for (let i = 0; i < argv.length; i++) {
 const a = argv[i];
 if (a === '--help' || a === '-h') args.help = true;
@@ -95,7 +97,8 @@ else if (a === '--check-cookies') args.checkCookies = true;
 else if (a === '--headless') args.headless = true;
 else if (a === '--manual') args.manual = true;
 else if (a === '--keep-all') args.keepAll = true;
-else if (a === '--no-merchant-filter') args.noMerchantFilter = true;
+else if (a === '--merchant-filter') args.merchantFilter = true;
+else if (a === '--no-merchant-filter') args.merchantFilter = false;
 else if (a === '--max-age-days') args.maxAgeDays = parseInt(argv[++i], 10);
 else if (a.startsWith('--max-age-days=')) args.maxAgeDays = parseInt(a.slice('--max-age-days='.length), 10);
 else if (a === '--import-session') args.importSession = String(argv[++i] || '').trim();
@@ -1202,11 +1205,12 @@ if (!post.timestamp) {
 console.log('帖子 ' + link.shortCode + ' 发布时间未知，照常采集。');
 }
 
-// 筛选二：商家帖。文案没有任何售卖信号的路人帖跳过、不采评论、不进
-// 结果；命中的信号挂在帖子条目上（merchantSignals）供下游复用，
-// --no-merchant-filter 时不跳过但照样标注。
+// 筛选二：商家帖（默认关，用户 2026-11-12 拍板不要商家过滤：只要有评论
+// 且有意向评论就采）。命中的售卖信号照常挂在帖子条目上（merchantSignals）
+// 供下游复用；只有显式加 --merchant-filter 时，文案没有任何售卖信号的
+// 路人帖才跳过、不采评论、不进结果。
 const mSignals = filters.merchantSignalsOf(post.caption);
-if (!args.noMerchantFilter && mSignals.length === 0) {
+if (args.merchantFilter && mSignals.length === 0) {
 output.stats.postsSkippedNonMerchant++;
 console.log('跳过非商家帖 @' + (post.ownerUsername || '未知') + '（文案无售卖信号）');
 await humanPause();
