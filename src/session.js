@@ -10,6 +10,10 @@
 //   - JSON 扁平字典对象 {名字: 值, ...}（含 sessionid 才算可用）
 //   - 带首行标签行的上述 JSON（自动剥杂质）
 //   - 整份 JSON 被 Base64 包装（可折行/带空格/base64url 变体）
+//   - 标签与 Base64 粘在同一行、只以冒号分隔（如 PCBM:<Base64>），以及卖家
+//     整行格式 用户名:密码:邮箱:标记:Base64 —— 逐个冒号切分试尾串，能解出
+//     cookie 数组的第一个尾串胜出；整行里的用户名只作黑名单预检与体检显示，
+//     密码/邮箱字段绝不进任何返回值、日志和报错。
 //   - Netscape HTTP Cookie File（经典 cookies.txt，7 段 TAB 分隔，认 #HttpOnly_ 行）
 //   - Cookie 头风格 name=value; name2=value2（单行/多行，可带 Cookie: 前缀）
 // 文件编码：UTF-8（含 BOM）、UTF-16LE / UTF-16BE（带 BOM，或无 BOM 靠 NUL 分布猜）。
@@ -241,23 +245,59 @@ function decodeBase64(s) {
   return Buffer.from(mapped, 'base64').toString('utf8');
 }
 
-// 第 3 步（Base64 恢复）的候选串，按成功概率排序，逐个试解码：
+// 第 3 步（Base64 恢复）的候选串，按成功概率排序，逐个试解码。
+// 每个候选是 { text, colonIndex }：colonIndex 是它由哪个冒号切分出来的
+// （在原文中的位置），非冒号切分的候选为 null——胜出候选的 colonIndex
+// 用来在原文里定位卖家整行的字段（见 detectSellerUsername）。
 //   a) 去掉首行（标签行）后全文去空白 —— 卖家文件常见“标题行 + Base64 正文”
 //   b) 全文去空白 —— 无标签行、可能按固定宽度折行或字符组间带空格的 Base64
 //   c) 只保留本身像 Base64 的行再拼接 —— 标签行混在中间时兜底
+//   d) 逐个冒号切分：原文里每一个 ':' 之后的尾巴，去空白后整体像 Base64
+//      的都收 —— 覆盖 PCBM:<Base64>（标签粘连）和卖家整行
+//      用户名:密码:邮箱:标记:<Base64>（密码字段本身带冒号也行，因为
+//      带冒号的中间尾巴过不了形状检查，只有真正的 Base64 尾巴能胜出）
 // 解码或解析失败的候选直接跳过，不抛错、不打印任何文件内容。
 function base64Candidates(raw) {
   const strip = (s) => String(s).replace(/\s+/g, '');
-  const lines = String(raw).split(/\r?\n/);
+  const text = String(raw);
+  const lines = text.split(/\r?\n/);
   const nonEmpty = lines.filter((l) => strip(l).length > 0);
   const cands = [];
-  if (nonEmpty.length > 1) cands.push(strip(nonEmpty.slice(1).join('')));
-  cands.push(strip(raw));
+  const seen = new Set();
+  const push = (t, colonIndex) => {
+    if (!isBase64Shaped(t) || seen.has(t)) return;
+    seen.add(t);
+    cands.push({ text: t, colonIndex: colonIndex });
+  };
+  if (nonEmpty.length > 1) push(strip(nonEmpty.slice(1).join('')), null);
+  push(strip(text), null);
   const shapedOnly = nonEmpty.filter((l) => isBase64Shaped(strip(l)));
   if (shapedOnly.length > 0 && shapedOnly.length < nonEmpty.length) {
-    cands.push(strip(shapedOnly.join('')));
+    push(strip(shapedOnly.join('')), null);
   }
-  return Array.from(new Set(cands)).filter(isBase64Shaped);
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== ':') continue;
+    push(strip(text.slice(i + 1)), i);
+  }
+  return cands;
+}
+
+// 卖家整行元数据：胜出尾串来自冒号切分时，看冒号之前那一行（卖家整行
+// 本身就是一行）按 ':' 切开的字段：字段数 ≥3、且有字段含 '@'（邮箱），
+// 才认定这是“用户名:密码:邮箱:...”整行，取第 1 个字段作账号名候选。
+// 用途只有两个：--check-cookies 显示“账号：<用户名>”，以及开浏览器之前
+// 的主号黑名单预检。密码、邮箱字段绝不从这里出去——本函数只返回用户名。
+function detectSellerUsername(text, colonIndex) {
+  if (colonIndex === null || colonIndex === undefined || colonIndex < 0) return null;
+  const head = String(text).slice(0, colonIndex);
+  const line = head.split(/\r?\n/).pop() || '';
+  const fields = line.split(':');
+  if (fields.length < 3) return null;
+  if (!fields.some((f) => f.includes('@'))) return null;
+  const username = fields[0].trim();
+  // 账号名只可能是 IG 用户名字符集；长得不像就当没有，免得误报
+  if (!/^[A-Za-z0-9._]+$/.test(username)) return null;
+  return username;
 }
 
 // ---------------------------------------------------------------------------
@@ -369,6 +409,7 @@ function finalizeConversion(conv, format) {
       cookieNames: Array.from(new Set(conv.names)).sort().slice(0, 30),
       hasSessionid: true,
       storageState: { cookies: conv.cookies, origins: conv.origins },
+      detectedUsername: null,
       error: null,
     };
   }
@@ -379,19 +420,21 @@ function finalizeConversion(conv, format) {
     cookieNames: Array.from(new Set(conv.names)).sort().slice(0, 30),
     hasSessionid: false,
     storageState: null,
+    detectedUsername: null,
     error: err,
   };
 }
 
 // 核心分析管线（已解码的文本进）：依次试 JSON（含字典）→ Base64 → Netscape →
-// Cookie 头。返回 { format, cookieNames, hasSessionid, storageState, error }，
+// Cookie 头。返回 { format, cookieNames, hasSessionid, storageState,
+// detectedUsername, error }（detectedUsername 只在卖家整行胜出时有值），
 // 全程不把 cookie 的值放进任何字段（storageState 本身除外——那是内部使用对象）。
 function analyzeText(text) {
   const raw = String(text || '').replace(/^\uFEFF/, '');
   if (!raw.trim()) {
     const err = new Error('会话文件是空的，里面什么都没有。请确认放进来的文件没选错。');
     err.code = 'empty';
-    return { format: 'unknown', cookieNames: [], hasSessionid: false, storageState: null, error: err };
+    return { format: 'unknown', cookieNames: [], hasSessionid: false, storageState: null, detectedUsername: null, error: err };
   }
 
   // 1) JSON 家族（纯 JSON / 带标签行 / 扁平字典）
@@ -403,18 +446,24 @@ function analyzeText(text) {
     const err = new Error('会话文件格式不对：没有找到 cookies 数组。请确认导出的文件是 cookie JSON 或本工具的 .storage.json。');
     err.code = 'no_cookies_array';
     err.formatDetected = 'json-object';
-    return { format: 'json-object', cookieNames: [], hasSessionid: false, storageState: null, error: err };
+    return { format: 'json-object', cookieNames: [], hasSessionid: false, storageState: null, detectedUsername: null, error: err };
   }
 
   // 2) Base64 包装（解开后回到 JSON 家族；外层格式记 base64包装）
+  //    第一个能解出 cookie 数组的尾串/候选胜出；若它来自冒号切分，
+  //    顺带从卖家整行里认出账号名（只有用户名，密码/邮箱不出本模块）。
   for (const cand of base64Candidates(raw)) {
     let decoded = '';
-    try { decoded = decodeBase64(cand); } catch (_) { continue; }
+    try { decoded = decodeBase64(cand.text); } catch (_) { continue; }
     if (!decoded) continue;
     const inner = tryParseJsonText(decoded.replace(/^\uFEFF/, ''));
     if (inner === undefined || inner === null) continue;
     const conv = convertParsedJson(inner);
-    if (conv) return finalizeConversion(conv, 'base64');
+    if (conv) {
+      const result = finalizeConversion(conv, 'base64');
+      result.detectedUsername = detectSellerUsername(raw, cand.colonIndex);
+      return result;
+    }
   }
 
   // 3) Netscape cookies.txt
@@ -433,7 +482,7 @@ function analyzeText(text) {
 
   const err = new Error('会话文件读不了，已试过的读法都失败：纯 JSON、带标题行 JSON、Base64 包装、Netscape cookies.txt、Cookie 头。文件可能是未支持的格式，或已损坏。可以先跑 node collector.js --check-cookies 看每个文件被认成什么格式，或向卖家索取纯 JSON 格式的 cookie 导出。');
   err.code = 'unparseable';
-  return { format: 'unknown', cookieNames: [], hasSessionid: false, storageState: null, error: err };
+  return { format: 'unknown', cookieNames: [], hasSessionid: false, storageState: null, detectedUsername: null, error: err };
 }
 
 // 字节 → 体检结论（先过编码层再进分析管线）
@@ -460,14 +509,27 @@ function parseSessionBuffer(buf) {
   return result.storageState;
 }
 
-function loadSessionFile(filePath) {
+// 详细版：除了 storageState，还带回体检信息（格式、卖家整行里认出的
+// 账号名 detectedUsername）——导入/自动模式靠它在开浏览器之前先过一遍
+// 主号黑名单预检。detectedUsername 只有用户名本身，不含密码/邮箱。
+function loadSessionFileDetailed(filePath) {
   let buf;
   try {
     buf = fs.readFileSync(filePath);
   } catch (e) {
     throw new Error('会话文件读不到：' + filePath + '（请确认路径正确）');
   }
-  return parseSessionBuffer(buf);
+  const result = analyzeSessionBuffer(buf);
+  if (!result.storageState) throw result.error;
+  return {
+    storageState: result.storageState,
+    detectedUsername: result.detectedUsername || null,
+    format: result.format,
+  };
+}
+
+function loadSessionFile(filePath) {
+  return loadSessionFileDetailed(filePath).storageState;
 }
 
 // sessions/<用户名>.storage.json 的落盘路径（用户名做安全化处理）
@@ -499,7 +561,9 @@ module.exports = {
   analyzeSessionBuffer,
   parseSessionText,
   parseSessionBuffer,
+  detectSellerUsername,
   loadSessionFile,
+  loadSessionFileDetailed,
   sessionFilePath,
   writeStorageStateFile,
 };

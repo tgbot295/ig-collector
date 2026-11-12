@@ -419,11 +419,14 @@ return 0;
 for (const t of targets) {
 const d = cookiesDir.diagnoseFile(t.fullPath, t.label);
 const names = d.cookieNames.length > 0 ? d.cookieNames.join('、') : '（无）';
+// 卖家整行里认出的账号名可以显示（用户在自己机器上看自己的文件）；
+// 密码/邮箱从不出现在体检结果里。
+const accountPart = d.detectedUsername ? '；账号：' + d.detectedUsername : '';
 if (d.ok) {
-console.log('[可用] ' + d.file + ' — 格式：' + d.format + '；cookie：' + names + '；sessionid：有');
+console.log('[可用] ' + d.file + ' — 格式：' + d.format + '；cookie：' + names + '；sessionid：有' + accountPart);
 } else {
 console.log('[不可用] ' + d.file + ' — 格式：' + d.format + '；cookie：' + names +
-'；sessionid：' + (d.hasSessionid ? '有' : '无') + '；原因：' + d.reason);
+'；sessionid：' + (d.hasSessionid ? '有' : '无') + accountPart + '；原因：' + d.reason);
 }
 }
 return 0;
@@ -452,6 +455,7 @@ if (fs.existsSync(path.join(config.outDir, 'accounts.txt'))) {
 // 会话文件等于账号钥匙：这里只读进内存，控制台只报 cookie 名字/数量，绝不报值。
 let importMode = null; // 'import-session' | 'import-cookies' | null
 let importState = null;
+let importDetectedUsername = null; // 卖家整行里认出的账号名（只有用户名）
 if (args.importSession && args.importCookies) {
 console.log('错误：--import-session 和 --import-cookies 只能选一个。');
 return 1;
@@ -460,7 +464,9 @@ const importFile = args.importSession || args.importCookies;
 if (importFile) {
 importMode = args.importSession ? 'import-session' : 'import-cookies';
 try {
-importState = sessionStore.loadSessionFile(importFile);
+const detailed = sessionStore.loadSessionFileDetailed(importFile);
+importState = detailed.storageState;
+importDetectedUsername = detailed.detectedUsername;
 } catch (e) {
 console.log('错误：' + e.message);
 return 1;
@@ -468,12 +474,22 @@ return 1;
 const sum = sessionStore.summarizeState(importState);
 console.log('已读取会话文件（' + importMode + '）：共 ' + sum.cookieCount + ' 个 cookie，包含 ' +
 sum.cookieNames.join('、') + '。文件等于账号钥匙，只放本地。');
+// 卖家整行附带的账号名先过黑名单预检：命中主号在开浏览器之前就中止
+// （退出码 2）；没命中也只是预检，登录后还会核验实际登录的账号。
+if (importDetectedUsername) {
+console.log('文件里附带的账号名：@' + importDetectedUsername + '（仅作预检，登录后还会再核验实际账号）');
+if (guard.isBlockedUsername(importDetectedUsername, config.blocklist)) {
+console.log('错误：文件里附带的账号 @' + importDetectedUsername + ' 是受保护的主号，拒绝用它登录采集（还没打开浏览器就已中止）。');
+return 2;
+}
+}
 }
 
 // ---- 账号选择（开浏览器之前完成；一次只跑一个账号，不轮换；会话导入模式跳过）----
 let selected = null;
 // 自动模式（只给 --keyword、没指定任何登录方式）时挑出的候选会话：
-// [{ label, storageState }]，label 只含来源和文件名（不含任何 cookie 值）。
+// [{ label, storageState, detectedUsername }]，label 只含来源和文件名
+// （不含任何 cookie 值）；detectedUsername 只有用户名本身（可为 null）。
 // 在登录核验阶段按顺序逐个试（见下面浏览器阶段），开始采集后不再换号。
 let autoCandidates = null;
 if (!importMode && !args.manual) {
@@ -502,7 +518,11 @@ if (!importMode && !args.manual) {
     dirScan.unparseable.forEach((u) =>
       console.log('cookies 文件夹里的文件「' + u.file + '」跳过（' + u.reason + '），不会使用它。'));
     if (dirScan.parseable.length > 0) {
-      autoCandidates = dirScan.parseable.map((c) => ({ label: 'cookies/' + c.file, storageState: c.storageState }));
+      autoCandidates = dirScan.parseable.map((c) => ({
+        label: 'cookies/' + c.file,
+        storageState: c.storageState,
+        detectedUsername: c.detectedUsername || null,
+      }));
       console.log('自动模式：在 cookies 文件夹里找到 ' + autoCandidates.length +
         ' 个可用的会话文件，将在登录核验阶段按文件名顺序逐个试。');
     } else {
@@ -511,8 +531,12 @@ if (!importMode && !args.manual) {
         const rootPath = path.join(__dirname, rootName);
         if (!fs.existsSync(rootPath)) continue;
         try {
-          const st = sessionStore.loadSessionFile(rootPath);
-          autoCandidates = [{ label: rootName, storageState: st }];
+          const detailed = sessionStore.loadSessionFileDetailed(rootPath);
+          autoCandidates = [{
+            label: rootName,
+            storageState: detailed.storageState,
+            detectedUsername: detailed.detectedUsername,
+          }];
           console.log('自动模式：使用根目录的 ' + rootName + ' 里的会话登录。');
           break;
         } catch (e) {
@@ -549,6 +573,17 @@ if (!importMode && !args.manual) {
   }
 }
 if (args.manual) console.log('手动登录模式（--manual）：忽略 accounts.txt。');
+// 自动模式黑名单预检：任一候选会话附带的账号名（卖家整行里的用户名）
+// 命中主号黑名单，在开浏览器之前就整轮中止（退出码 2），不试不登。
+if (autoCandidates) {
+  const bad = autoCandidates.find((c) =>
+    c.detectedUsername && guard.isBlockedUsername(c.detectedUsername, config.blocklist));
+  if (bad) {
+    console.log('错误：会话文件 ' + bad.label + ' 附带的账号 @' + bad.detectedUsername +
+      ' 是受保护的主号，拒绝用它登录采集（还没打开浏览器就已中止）。');
+    return 2;
+  }
+}
 const profileDir = selected ? config.profileDirFor(selected.username) : config.profileDir;
 
 const output = {

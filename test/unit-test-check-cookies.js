@@ -37,6 +37,15 @@ try {
   ].join('\n'), 'utf8');
   // 垃圾文件
   fs.writeFileSync(path.join(dir, 'bad.txt'), '这不是 cookie %%%', 'utf8');
+  // 卖家整行：用户名:密码:邮箱:标记:Base64(cookie JSON)
+  const sellerB64 = Buffer.from(JSON.stringify([
+    { name: 'sessionid', value: FAKE_ID, domain: '.instagram.com', path: '/' },
+    { name: 'csrftoken', value: FAKE_CSRF, domain: '.instagram.com' },
+  ]), 'utf8').toString('base64');
+  fs.writeFileSync(path.join(dir, 'seller-line.txt'),
+    'fake_user_99:fakePass99:fake@example.jp:DHNK KILL TSAN PCBM:' + sellerB64, 'utf8');
+  // 只有尾巴的碎片行：PCBM:<Base64>
+  fs.writeFileSync(path.join(dir, 'tail.txt'), 'PCBM:' + sellerB64, 'utf8');
 
   ok('check-cookies: exits 0 and reports per-file verdicts, names only', () => {
     out = execFileSync(process.execPath, [collectorPath, '--check-cookies', '--cookies-dir', dir],
@@ -48,11 +57,19 @@ try {
     assert.ok(out.includes('sessionid：有'), 'sessionid presence should be reported');
     assert.ok(out.includes('[不可用] bad.txt'), 'bad.txt should be unusable');
     assert.ok(out.includes('sessionid'), 'cookie names should be listed');
+    // 卖家整行：可用、格式认成 base64包装、只显示账号名
+    assert.ok(out.includes('[可用] seller-line.txt'), 'seller-line.txt should be usable');
+    assert.ok(out.includes('格式：base64包装'), 'seller line format should be named');
+    assert.ok(out.includes('账号：fake_user_99'), 'seller line username should be shown');
+    // PCBM: 尾巴碎片也能用（认不出账号名，不显示账号）
+    assert.ok(out.includes('[可用] tail.txt'), 'tail.txt should be usable');
   });
 
   ok('check-cookies hygiene: no fake cookie value in stdout', () => {
     assert.ok(!out.includes(FAKE_ID), 'sessionid value leaked into stdout');
     assert.ok(!out.includes(FAKE_CSRF), 'csrftoken value leaked into stdout');
+    assert.ok(!out.includes('fakePass99'), 'seller-line password leaked into stdout');
+    assert.ok(!out.includes('fake@example.jp'), 'seller-line email leaked into stdout');
   });
 
   ok('check-cookies: empty dir still exits 0 with guidance', () => {

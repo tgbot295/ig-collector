@@ -141,4 +141,46 @@ try {
   fs.rmSync(dir2, { recursive: true, force: true });
 }
 
+// ---- 第三组：卖家整行（用户名:密码:邮箱:标记:Base64）与 PCBM: 尾巴碎片 ----
+const dir3 = fs.mkdtempSync(path.join(os.tmpdir(), 'ig-cookiesdir-test3-'));
+try {
+  const sellerB64 = Buffer.from(JSON.stringify([
+    { name: 'sessionid', value: FAKE_ID_1, domain: '.instagram.com', path: '/' },
+    { name: 'csrftoken', value: FAKE_CSRF, domain: '.instagram.com' },
+  ]), 'utf8').toString('base64');
+  // 整行原样丢进来，文件名随便
+  fs.writeFileSync(path.join(dir3, 'seller.txt'),
+    'fake_user_99:fakePass99:fake@example.jp:DHNK KILL TSAN PCBM:' + sellerB64, 'utf8');
+  // 只有标记词 + Base64 的尾巴碎片（用户真实文件 details (9).txt 的形状）
+  fs.writeFileSync(path.join(dir3, 'details (9).txt'), 'PCBM:' + sellerB64, 'utf8');
+
+  let loaded3 = null;
+  ok('load3: seller line + PCBM tail fragment are parseable', () => {
+    loaded3 = cookiesDir.loadCandidates(dir3);
+    assert.deepStrictEqual(loaded3.parseable.map((c) => c.file), ['details (9).txt', 'seller.txt']);
+    assert.deepStrictEqual(loaded3.unparseable, []);
+  });
+
+  ok('load3: detectedUsername only from the full seller line, never password/email', () => {
+    const seller = loaded3.parseable.find((c) => c.file === 'seller.txt');
+    assert.strictEqual(seller.detectedUsername, 'fake_user_99');
+    const tail = loaded3.parseable.find((c) => c.file === 'details (9).txt');
+    assert.strictEqual(tail.detectedUsername, null);
+    const d = cookiesDir.diagnoseFile(path.join(dir3, 'seller.txt'));
+    assert.strictEqual(d.ok, true);
+    assert.strictEqual(d.format, 'base64包装');
+    assert.strictEqual(d.detectedUsername, 'fake_user_99');
+    const blob = JSON.stringify({
+      parseable: loaded3.parseable.map((c) => ({ file: c.file, detectedUsername: c.detectedUsername })),
+      diagnose: d,
+    });
+    assert.ok(!blob.includes('fakePass99'), 'password leaked');
+    assert.ok(!blob.includes('fake@example.jp'), 'email leaked');
+    assert.ok(!blob.includes(FAKE_ID_1), 'sessionid value leaked');
+    assert.ok(!blob.includes(FAKE_CSRF), 'csrftoken value leaked');
+  });
+} finally {
+  fs.rmSync(dir3, { recursive: true, force: true });
+}
+
 console.log('cookies 文件夹单测全部通过：' + passed + ' 项');

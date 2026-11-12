@@ -63,8 +63,11 @@ function scanCookiesDir(dir) {
 
 // 逐个候选读字节并用 session.js 的解析（编码层 + JSON/Base64/Netscape/Cookie头都认）：
 // - 能解出带 sessionid 的 storageState 的进 parseable（保持文件名排序）；
+//   卖家整行格式还会带出 detectedUsername（只有用户名，供开浏览器前的
+//   黑名单预检），密码/邮箱永远不出现在返回值里；
 // - 解不出的进 unparseable，只留 { file, reason }，reason 只是一句类别。
-// 返回 { parseable: [{ file, fullPath, storageState }], unparseable: [{ file, reason }] }
+// 返回 { parseable: [{ file, fullPath, storageState, detectedUsername }],
+//         unparseable: [{ file, reason }] }
 function loadCandidates(dir) {
   const parseable = [];
   const unparseable = [];
@@ -76,19 +79,26 @@ function loadCandidates(dir) {
       unparseable.push({ file: cand.file, reason: '读不出（格式不认）' });
       continue;
     }
-    try {
-      const storageState = sessionStore.parseSessionBuffer(buf);
-      parseable.push({ file: cand.file, fullPath: cand.fullPath, storageState: storageState });
-    } catch (e) {
-      unparseable.push({ file: cand.file, reason: reasonCategory(e) });
+    const a = sessionStore.analyzeSessionBuffer(buf);
+    if (a.storageState) {
+      parseable.push({
+        file: cand.file,
+        fullPath: cand.fullPath,
+        storageState: a.storageState,
+        detectedUsername: a.detectedUsername || null,
+      });
+    } else {
+      unparseable.push({ file: cand.file, reason: reasonCategory(a.error) });
     }
   }
   return { parseable: parseable, unparseable: unparseable };
 }
 
 // 体检单个文件（--check-cookies 用）：只返回可以安全打印的东西——
-// 文件名、格式中文名、cookie 名字清单、是否有 sessionid、结论和原因类别。
-// 绝不返回任何 cookie 的值。文件读不到时按不可用处理，不抛错。
+// 文件名、格式中文名、cookie 名字清单、是否有 sessionid、结论和原因类别，
+// 以及卖家整行认出的账号名 detectedUsername（只有用户名，用户在自己机器
+// 上看自己的文件没问题）。绝不返回任何 cookie 的值、密码或邮箱。
+// 文件读不到时按不可用处理，不抛错。
 function diagnoseFile(fullPath, label) {
   let buf;
   try {
@@ -99,6 +109,7 @@ function diagnoseFile(fullPath, label) {
       format: '未知',
       cookieNames: [],
       hasSessionid: false,
+      detectedUsername: null,
       ok: false,
       reason: '读不出（格式不认）',
     };
@@ -109,6 +120,8 @@ function diagnoseFile(fullPath, label) {
     format: sessionStore.FORMAT_LABELS[a.format] || '未知',
     cookieNames: a.cookieNames || [],
     hasSessionid: !!a.hasSessionid,
+    // 卖家整行里认出的账号名（只有用户名；密码/邮箱不在 analyze 结果里）
+    detectedUsername: a.detectedUsername || null,
     ok: !!a.storageState,
     reason: a.storageState ? '' : reasonCategory(a.error),
   };

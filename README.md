@@ -101,7 +101,10 @@ node collector.js --keyword downjacket --manual
    用浏览器 cookie 导出扩展之类拿到的 JSON 也行，裸数组或
    `{ "cookies": [...] }` 两种形状都认。另外这些卖家常见格式也都认：
    扁平字典 JSON（`{"sessionid": "...", ...}`）、整份被 Base64 包了一层
-   的、Netscape 格式的 cookies.txt（curl / 扩展导出的经典格式）、
+   的、卖家整行格式 用户名:密码:邮箱:标记:Base64 也可整行放入（脚本逐个
+   冒号切分找 Base64 尾巴，整行里的用户名只用于开浏览器前的主号黑名单
+   预检，密码/邮箱不会被打印或记录）、只有尾巴的 `PCBM:Base64...` 碎片
+   也认、Netscape 格式的 cookies.txt（curl / 扩展导出的经典格式）、
    `name=value; ...` 的 Cookie 头文本。文件编码是 UTF-16（记事本另存
    的常见结果）也能读。命令是：
 

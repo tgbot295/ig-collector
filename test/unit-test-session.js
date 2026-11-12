@@ -208,6 +208,67 @@ ok('base64 hygiene: error messages contain no fake cookie value', () => {
   assert.ok(!blob.includes(FAKE_CSRF), 'csrftoken value leaked into error');
 });
 
+// ---- 卖家整行格式：用户名:密码:邮箱:标记:Base64（逐个冒号切分试尾串） ----
+const FAKE_PASSWORD = 'fakePass99';
+const FAKE_EMAIL = 'fake@example.jp';
+const SELLER_LINE = 'fake_user_99:' + FAKE_PASSWORD + ':' + FAKE_EMAIL + ':DHNK KILL TSAN PCBM:' + B64_TEXT;
+
+ok('base64: PCBM:<base64> glued label parses, sessionid found', () => {
+  const st = sessionStore.parseSessionText('PCBM:' + B64_TEXT);
+  assert.strictEqual(st.cookies.length, 4);
+  assert.ok(sessionStore.hasCookie(st, 'sessionid'));
+  const a = sessionStore.analyzeSessionBuffer(Buffer.from('PCBM:' + B64_TEXT, 'utf8'));
+  assert.strictEqual(a.format, 'base64');
+  // 只有一个字段的头，不是整行格式，认不出账号名
+  assert.strictEqual(a.detectedUsername, null);
+});
+
+ok('base64: spaced label glued with colon (DHNK KILL TSAN PCBM:<base64>) parses', () => {
+  const st = sessionStore.parseSessionText('DHNK KILL TSAN PCBM:' + B64_TEXT);
+  assert.strictEqual(st.cookies.length, 4);
+  assert.ok(sessionStore.hasCookie(st, 'sessionid'));
+});
+
+ok('seller line: full colon-joined line parses, detectedUsername = first field', () => {
+  const st = sessionStore.parseSessionText(SELLER_LINE);
+  assert.strictEqual(st.cookies.length, 4);
+  assert.ok(sessionStore.hasCookie(st, 'sessionid'));
+  const a = sessionStore.analyzeSessionBuffer(Buffer.from(SELLER_LINE, 'utf8'));
+  assert.strictEqual(sessionStore.FORMAT_LABELS[a.format], 'base64包装');
+  assert.strictEqual(a.hasSessionid, true);
+  assert.strictEqual(a.detectedUsername, 'fake_user_99');
+});
+
+ok('seller line: colon inside the password field still parses', () => {
+  const line = 'fake_user_99:fake:pass:word:' + FAKE_EMAIL + ':DHNK KILL TSAN PCBM:' + B64_TEXT;
+  const a = sessionStore.analyzeSessionBuffer(Buffer.from(line, 'utf8'));
+  assert.ok(a.storageState, 'should parse despite colons in password');
+  assert.strictEqual(a.detectedUsername, 'fake_user_99');
+  assert.ok(sessionStore.hasCookie(a.storageState, 'sessionid'));
+});
+
+ok('seller line: blocked main-account username is detected for the pre-check', () => {
+  const line = 'nataliem.jordan:' + FAKE_PASSWORD + ':' + FAKE_EMAIL + ':DHNK KILL TSAN PCBM:' + B64_TEXT;
+  const a = sessionStore.analyzeSessionBuffer(Buffer.from(line, 'utf8'));
+  assert.strictEqual(a.detectedUsername, 'nataliem.jordan');
+  // collector.js 在开浏览器之前就是用这个用户名走同一条黑名单判定并中止（退出码 2）
+  assert.strictEqual(guard.isBlockedUsername(a.detectedUsername, guard.DEFAULT_BLOCKLIST), true);
+});
+
+ok('seller line hygiene: password/email/cookie values never in analyze report', () => {
+  const a = sessionStore.analyzeSessionBuffer(Buffer.from(SELLER_LINE, 'utf8'));
+  const blob = JSON.stringify({
+    format: a.format, cookieNames: a.cookieNames, hasSessionid: a.hasSessionid,
+    detectedUsername: a.detectedUsername, encoding: a.encoding,
+    error: a.error ? a.error.message : null,
+  });
+  assert.ok(blob.includes('fake_user_99'), 'username is the one allowed field');
+  assert.ok(!blob.includes(FAKE_PASSWORD), 'password leaked into report');
+  assert.ok(!blob.includes(FAKE_EMAIL), 'email leaked into report');
+  assert.ok(!blob.includes(FAKE_SESSION_ID), 'sessionid value leaked into report');
+  assert.ok(!blob.includes(FAKE_CSRF), 'csrftoken value leaked into report');
+});
+
 // ---- 新格式：编码层（BOM / UTF-16）、Netscape、Cookie 头、扁平字典 ----
 const PLAIN_JSON = JSON.stringify(FAKE_COOKIES_ARRAY);
 
