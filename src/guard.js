@@ -17,7 +17,7 @@ function isBlockedUsername(username, blocklist) {
   return list.some((b) => normalizeUsername(b) === target);
 }
 
-const CHECKPOINT_URL_RE = /\/(challenge|checkpoint)(\/|\?|#|$)/i;
+const CHECKPOINT_URL_RE = /\/(challenge|checkpoint|auth_platform)(\/|\?|#|$)/i;
 const LOGIN_URL_RE = /\/accounts\/login(\/|\?|#|$)/i;
 
 const CHECKPOINT_PHRASES = [
@@ -107,10 +107,67 @@ function detectStopPage(input) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// 登录核验分类器（纯函数，可单测）：collector 在导入/自动模式里打开 IG 首页、
+// 关掉插屏并等页面安定后，先采集一组“信号”（只含布尔与 URL/标题，绝不含
+// 任何 cookie 值），再由这里给结论。
+//
+// 教训（实地证据）：曾经只凭“没提取到用户名”就判 session_expired，但页面
+// 其实已经登录上了——用户名提取不可靠，绝不能作为已登录的必要条件。
+// 现在的准绳是三条同时成立即算已登录（用户名只是加分项）：
+//   (a) 浏览器上下文里还留着 instagram.com 的 sessionid cookie
+//   (b) 当前 URL 不是登录 URL
+//   (c) 页面上没有【可见的】密码输入框
+//
+// signals = {
+//   url, title,
+//   urlIsLogin,           // URL 落在 /accounts/login
+//   hasVisiblePasswordInput, // 页面里有可见的密码输入框
+//   hasLoginForm,         // 页面里有登录表单（弱信号，DOM 里藏着也算）
+//   hasProfileNavSignal,  // 已登录导航信号（个人主页链接/设置齿轮/头像）
+//   hasCheckpointSignal,  // URL 或文案命中验证/检查点
+//   hasSessionidCookie,   // 上下文里还有 sessionid cookie
+//   hasUsername,          // 读到了当前用户名（尽力而为，读不到不算失败）
+// }
+// pass = 第几次核验（1 起）。session_expired 判得非常严：只有在插屏处理过、
+// 又刷新重看一次之后，登录 URL 或可见密码框依然存在，才准判失效；
+// 其余一切不明确的情况给 retry（第一次）或 not_confirmed（第二次），
+// 由调用方存调试截图人工看，绝不冒充“已失效”。
+// 返回 { verdict, detail }，verdict ∈
+//   logged_in | checkpoint | retry | session_expired | not_confirmed
+// ---------------------------------------------------------------------------
+function classifyLoginSignals(signals, pass) {
+  const s = signals || {};
+  const p = Number(pass) >= 2 ? 2 : 1;
+  const url = String(s.url || '');
+  const urlIsLogin = !!(s.urlIsLogin || LOGIN_URL_RE.test(url));
+
+  if (s.hasCheckpointSignal || CHECKPOINT_URL_RE.test(url)) {
+    return { verdict: 'checkpoint', detail: '命中验证/检查点信号' };
+  }
+  if (s.hasUsername || s.hasProfileNavSignal) {
+    return { verdict: 'logged_in', detail: '有已登录信号（用户名/导航）' };
+  }
+  // 准绳三条：有 sessionid、没被赶到登录 URL、没有可见密码框
+  if (s.hasSessionidCookie && !urlIsLogin && !s.hasVisiblePasswordInput) {
+    return { verdict: 'logged_in', detail: '上下文有 sessionid、不在登录页、无可见密码框' };
+  }
+  const strictWall = urlIsLogin || !!s.hasVisiblePasswordInput;
+  const softWall = strictWall || !!s.hasLoginForm;
+  if (softWall) {
+    if (p < 2) return { verdict: 'retry', detail: '第一次核验像登录墙，等刷新后再看一次' };
+    if (strictWall) return { verdict: 'session_expired', detail: '刷新后登录 URL/可见密码框依然在，会话未被服务器接受' };
+    return { verdict: 'not_confirmed', detail: '只有隐藏的登录表单信号，无法确认失效' };
+  }
+  if (p < 2) return { verdict: 'retry', detail: '第一次核验信号不明确，等刷新后再看一次' };
+  return { verdict: 'not_confirmed', detail: '两次核验都无法确认登录态（既不是登录墙，也没有已登录信号）' };
+}
+
 module.exports = {
   DEFAULT_BLOCKLIST,
   normalizeUsername,
   isBlockedUsername,
   detectStopPage,
+  classifyLoginSignals,
   reasonLabel,
 };

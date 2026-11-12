@@ -61,14 +61,20 @@ function mapSameSite(v) {
 }
 
 function toExpires(cookie) {
+  // 会话型 cookie（导出里标了 session:true，如经典的 rur 条目）一律 -1：
+  // 它按定义没有到期时间，就算源文件顺带写了一个 expirationDate 也不作数——
+  // 写成 0 / 过去的时间戳，浏览器会把这个 cookie 静默丢掉，会话就“被失效”了。
+  if (cookie.session === true) return -1;
   let e = cookie.expires !== undefined ? cookie.expires : cookie.expirationDate;
-  if (e === undefined || e === null || e === '') return -1;
+  if (e === undefined || e === null || e === '') return -1; // 没写到期 = 会话 cookie
   if (typeof e === 'string') {
     const t = Date.parse(e);
     if (!Number.isNaN(t)) return Math.floor(t / 1000);
     e = Number(e);
   }
   const n = Number(e);
+  // 0 / 负数 / NaN 都不是合法到期时间（Playwright 里 -1 才是“会话 cookie”），
+  // 一律归一到 -1，绝不能把 0 或 NaN 透传给浏览器（会被当成已过期丢弃）。
   if (!Number.isFinite(n) || n <= 0) return -1;
   return Math.floor(n);
 }
@@ -80,6 +86,9 @@ function normalizeCookie(raw) {
   const name = String(raw.name || '').trim();
   if (!name) return null;
   if (!isInstagramDomain(raw.domain)) return null;
+  // value 必须逐字节原样透传：不解码、不重新编码、不裁剪。
+  // sessionid 本身就是 URL 编码过的（含 %3A 等），任何“顺手处理”
+  // 都会让服务器不认这把钥匙，把活会话误判成失效。
   const value = raw.value === undefined || raw.value === null ? '' : String(raw.value);
   // 只重建 Playwright 接受的字段：hostOnly / session / storeId /
   // firstPartyDomain / partitionKey 等导出格式自带的字段一律丢弃。

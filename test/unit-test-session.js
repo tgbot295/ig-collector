@@ -380,4 +380,66 @@ ok('analyze: format labels + names reported, values never in report', () => {
   assert.ok(!blob.includes(FAKE_CSRF), 'csrftoken value leaked into analyze report');
 });
 
+// ---- 转换保真度（会话被误判失效的源头之一，逐条钉死） ----
+ok('fidelity: session:true cookie (rur-style, no expirationDate) → expires -1', () => {
+  const st = sessionStore.toStorageState([
+    { name: 'sessionid', value: FAKE_SESSION_ID, domain: '.instagram.com', expirationDate: 1893456000 },
+    { name: 'rur', value: '"FAKE_RUR_VALUE"', domain: '.instagram.com', session: true, httpOnly: true, secure: true },
+  ]);
+  const rur = st.cookies.find((c) => c.name === 'rur');
+  assert.strictEqual(rur.expires, -1);
+});
+
+ok('fidelity: session:true wins even with a stale expirationDate present → expires -1', () => {
+  const st = sessionStore.toStorageState([
+    { name: 'sessionid', value: FAKE_SESSION_ID, domain: '.instagram.com', expirationDate: 1893456000 },
+    { name: 'rur', value: '"FAKE_RUR_VALUE"', domain: '.instagram.com', session: true, expirationDate: 123 }, // 1970 年，早过期
+  ]);
+  const rur = st.cookies.find((c) => c.name === 'rur');
+  assert.strictEqual(rur.expires, -1); // 不能让源文件里顺带写的过期时间把会话 cookie 弄丢
+});
+
+ok('fidelity: expires 0 / NaN normalize to -1, never passed through', () => {
+  const st = sessionStore.toStorageState([
+    { name: 'sessionid', value: FAKE_SESSION_ID, domain: '.instagram.com', expirationDate: 1893456000 },
+    { name: 'mid', value: 'fake-mid', domain: '.instagram.com', expires: 0 },
+    { name: 'ig_did', value: 'fake-did', domain: '.instagram.com', expirationDate: 'not-a-date' },
+  ]);
+  assert.strictEqual(st.cookies.find((c) => c.name === 'mid').expires, -1);
+  assert.strictEqual(st.cookies.find((c) => c.name === 'ig_did').expires, -1);
+});
+
+ok('fidelity: URL-encoded sessionid value round-trips byte-exact', () => {
+  const encoded = '1234567890%3AFAKEtoken%3A19%3AAYfakePart_8-x';
+  const viaApi = sessionStore.toStorageState([
+    { name: 'sessionid', value: encoded, domain: '.instagram.com', expirationDate: 1893456000 },
+  ]);
+  assert.strictEqual(viaApi.cookies.find((c) => c.name === 'sessionid').value, encoded);
+  const text = JSON.stringify([{ name: 'sessionid', value: encoded, domain: '.instagram.com', expirationDate: 1893456000 }]);
+  const viaText = sessionStore.parseSessionText(text);
+  assert.strictEqual(viaText.cookies.find((c) => c.name === 'sessionid').value, encoded);
+});
+
+ok('fidelity: value with inner spaces/symbols is not trimmed or re-encoded', () => {
+  const tricky = 'a b+c/d= e%20f';
+  const st = sessionStore.toStorageState([
+    { name: 'sessionid', value: FAKE_SESSION_ID, domain: '.instagram.com', expirationDate: 1893456000 },
+    { name: 'wd', value: tricky, domain: '.instagram.com', expirationDate: 1893456000 },
+  ]);
+  assert.strictEqual(st.cookies.find((c) => c.name === 'wd').value, tricky);
+});
+
+ok('fidelity: httpOnly/secure flags preserved from source (false stays false)', () => {
+  const st = sessionStore.toStorageState([
+    { name: 'sessionid', value: FAKE_SESSION_ID, domain: '.instagram.com', expirationDate: 1893456000, httpOnly: false, secure: false },
+    { name: 'csrftoken', value: FAKE_CSRF, domain: '.instagram.com', expirationDate: 1893456000, httpOnly: true, secure: true },
+  ]);
+  const sid = st.cookies.find((c) => c.name === 'sessionid');
+  assert.strictEqual(sid.httpOnly, false);
+  assert.strictEqual(sid.secure, false);
+  const csrf = st.cookies.find((c) => c.name === 'csrftoken');
+  assert.strictEqual(csrf.httpOnly, true);
+  assert.strictEqual(csrf.secure, true);
+});
+
 console.log('会话文件单测全部通过：' + passed + ' 项');

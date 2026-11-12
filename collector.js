@@ -296,6 +296,192 @@ text = await page.evaluate(() => ((document.body && document.body.innerText) || 
 return guard.detectStopPage({ url: page.url(), text});
 }
 
+// 关掉 IG 的插屏/弹窗再做核验，免得把插屏误读成登录状态问题：
+// - “保存登录信息？”页（/accounts/onetap/）和同类提示：点 Not now / 以后再说
+// - “开启通知？”提示：点 Not Now / 以后再说
+// 点不到就安静跳过（核验信号里会如实反映页面状态），点到后等页面安定。
+async function dismissInterstitials(page) {
+for (let round = 0; round < 2; round++) {
+let clicked = false;
+try {
+const btn = page.getByText(/^(not now|以后再说|暂不)$/i).first();
+await btn.click({ timeout: 1200 });
+clicked = true;
+} catch (_) { /* 没有这类按钮 */}
+if (!clicked) {
+try {
+const btn2 = page.locator('button:has-text("Not now"), button:has-text("以后再说"), div[role="button"]:has-text("Not now"), div[role="button"]:has-text("以后再说")').first();
+await btn2.click({ timeout: 1200 });
+clicked = true;
+} catch (_) { /* 没有这类按钮 */}
+}
+if (!clicked) break;
+await sleep(1500);
+}
+}
+
+// 采集一组登录核验信号（只有布尔、URL 和标题，绝不含任何 cookie 值）。
+// 已登录判定不靠提取用户名：准绳是上下文里有 sessionid、不在登录 URL、
+// 没有可见密码框（见 guard.classifyLoginSignals）。
+async function collectLoginSignals(page, context) {
+let dom = { title: '', hasVisiblePasswordInput: false, hasLoginForm: false, hasProfileNavSignal: false, bodyText: '' };
+try {
+dom = await page.evaluate(() => {
+const visible = (el) => {
+if (!el) return false;
+if (!el.getClientRects || el.getClientRects().length === 0) return false;
+const st = window.getComputedStyle(el);
+return st.display !== 'none' && st.visibility !== 'hidden';
+};
+const pwInputs = Array.from(document.querySelectorAll('input[type="password"], input[name="password"]'));
+const hasVisiblePasswordInput = pwInputs.some(visible);
+let hasLoginForm = false;
+document.querySelectorAll('form').forEach((f) => {
+if (f.querySelector('input[name="username"]') || f.querySelector('input[type="password"]') ||
+/login/i.test(f.getAttribute('action') || '')) hasLoginForm = true;
+});
+let hasProfileNavSignal = !!(
+document.querySelector('svg[aria-label="Profile"], svg[aria-label="Settings"], svg[aria-label="Options"]') ||
+document.querySelector('a[href^="/accounts/edit"]')
+);
+if (!hasProfileNavSignal) {
+const imgs = Array.from(document.querySelectorAll('nav img[alt], header img[alt]'));
+hasProfileNavSignal = imgs.some((img) => /'s profile picture/.test(img.getAttribute('alt') || ''));
+}
+return {
+title: document.title || '',
+hasVisiblePasswordInput: hasVisiblePasswordInput,
+hasLoginForm: hasLoginForm,
+hasProfileNavSignal: hasProfileNavSignal,
+bodyText: ((document.body && document.body.innerText) || '').slice(0, 4000),
+};
+});
+} catch (_) { /* 页面跳转中：信号保持空，分类器会走 retry/not_confirmed */}
+const url = page.url();
+let hasSessionidCookie = false;
+try {
+const cks = await context.cookies(config.baseUrl + '/');
+hasSessionidCookie = cks.some((c) => c.name === 'sessionid');
+} catch (_) { /* 忽略 */}
+const stop = guard.detectStopPage({ url: url, text: dom.bodyText || '' });
+return {
+url: url,
+title: dom.title || '',
+urlIsLogin: /\/accounts\/login(\/|\?|#|$)/i.test(url),
+hasVisiblePasswordInput: !!dom.hasVisiblePasswordInput,
+hasLoginForm: !!dom.hasLoginForm,
+hasProfileNavSignal: !!dom.hasProfileNavSignal,
+hasCheckpointSignal: !!(stop && stop.reason === 'checkpoint'),
+hasSessionidCookie: hasSessionidCookie,
+hasUsername: false,
+};
+}
+
+function debugStamp(d) {
+const p = (n) => String(n).padStart(2, '0');
+return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' +
+p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+}
+
+// 核验失败时把“脚本眼里的页面”存成证据，方便人工看图定性：
+// out/debug-<时间>.png 截图 + 同名 .json（只有核验信号、用到的候选文件名、
+// 上下文里的 cookie 名字——绝不含任何 cookie 值、不存页面 HTML）。
+// 有窗口模式下存完多停留约 5 秒，让用户能瞥一眼浏览器里的真实页面再关。
+async function saveDebugEvidence(page, context, info) {
+const opts = info || {};
+fs.mkdirSync(config.outDir, { recursive: true });
+const stamp = debugStamp(new Date());
+const pngFile = path.join(config.outDir, 'debug-' + stamp + '.png');
+const jsonFile = path.join(config.outDir, 'debug-' + stamp + '.json');
+try {
+await page.screenshot({ path: pngFile, timeout: 10000 });
+} catch (_) { /* 截不到图不影响结论，JSON 照样写 */}
+let cookieNames = [];
+try {
+const cks = await context.cookies();
+cookieNames = Array.from(new Set(cks.map((c) => c.name))).sort();
+} catch (_) { /* 忽略 */}
+const s = opts.signals || {};
+const record = {
+savedAt: new Date().toISOString(),
+verdict: opts.reason || '',
+candidateFile: opts.candidateLabel || null,
+signals: {
+url: s.url || '',
+title: s.title || '',
+urlIsLogin: !!s.urlIsLogin,
+hasVisiblePasswordInput: !!s.hasVisiblePasswordInput,
+hasLoginForm: !!s.hasLoginForm,
+hasProfileNavSignal: !!s.hasProfileNavSignal,
+hasCheckpointSignal: !!s.hasCheckpointSignal,
+hasSessionidCookie: !!s.hasSessionidCookie,
+hasUsername: !!s.hasUsername,
+},
+cookieNames: cookieNames,
+};
+try {
+fs.writeFileSync(jsonFile, JSON.stringify(record, null, 2), 'utf8');
+} catch (_) { /* 忽略 */}
+console.log('IG 到底给脚本看了什么，看 out/debug-*.png 这张截图。');
+console.log('本次调试证据：' + pngFile + '（截图）；' + jsonFile + '（核验信号，只有名字没有值）');
+if (opts.headed) {
+console.log('浏览器会多停留约 5 秒，你可以瞥一眼窗口里的页面再关。');
+await sleep(5000);
+}
+return { pngFile: pngFile, jsonFile: jsonFile };
+}
+
+// 导入/自动模式的登录核验（基于证据，不凭单一信号下结论）：
+// 打开首页 → 等 load + 约 2.5 秒安定 → 关插屏 → 采集信号 → 分类；
+// 登录墙或不明确时等 3 秒刷新重看一次（共两轮），第二轮仍是严格登录墙
+// 才判 session_expired；检查点直接按 checkpoint 停；无法确认按
+// not_logged_in 停。失败结论一律先存调试截图+信号 JSON 再返回。
+// 返回 { ok:true, username(可为 null) } 或 { ok:false, reason }，
+// reason ∈ session_expired | checkpoint | not_logged_in | network_error。
+// username 读不到不算失败：只要准绳三条成立就继续（调用方会提示）。
+async function verifyImportedLogin(page, context, opts) {
+const o = opts || {};
+try {
+await page.goto(config.baseUrl + '/', { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs });
+} catch (e) {
+return { ok: false, reason: 'network_error' };
+}
+try { await page.waitForLoadState('load', { timeout: 15000 }); } catch (_) { /* 忽略 */}
+await sleep(2500);
+
+let lastSignals = null;
+for (let pass = 1; pass <= 2; pass++) {
+await dismissInterstitials(page);
+const signals = await collectLoginSignals(page, context);
+const uname = await detectLoggedInUsername(page);
+signals.hasUsername = !!uname;
+lastSignals = signals;
+const verdict = guard.classifyLoginSignals(signals, pass);
+if (verdict.verdict === 'logged_in') {
+return { ok: true, username: uname || null };
+}
+if (verdict.verdict === 'checkpoint') {
+await saveDebugEvidence(page, context, { reason: 'checkpoint', signals: signals, candidateLabel: o.candidateLabel, headed: o.headed });
+return { ok: false, reason: 'checkpoint' };
+}
+if (verdict.verdict === 'retry' && pass < 2) {
+await sleep(3000);
+try {
+await page.reload({ waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs });
+} catch (_) { /* 刷新失败也继续到第二轮重新采集 */}
+try { await page.waitForLoadState('load', { timeout: 15000 }); } catch (_) { /* 忽略 */}
+await sleep(2500);
+continue;
+}
+// 第二轮的 session_expired / not_confirmed
+const reason = verdict.verdict === 'session_expired' ? 'session_expired' : 'not_logged_in';
+await saveDebugEvidence(page, context, { reason: reason, signals: signals, candidateLabel: o.candidateLabel, headed: o.headed });
+return { ok: false, reason: reason };
+}
+await saveDebugEvidence(page, context, { reason: 'not_logged_in', signals: lastSignals, candidateLabel: o.candidateLabel, headed: o.headed });
+return { ok: false, reason: 'not_logged_in' };
+}
+
 // 从帖子页提取数据：页面内嵌 JSON 优先，og 元信息补计数；评论再从 DOM 展开读取
 async function extractPostData(page, link) {
 let result = null;
@@ -673,6 +859,9 @@ if (autoCandidates) {
 // 在后面统一判定处立即中止整个运行（退出码 2），不会拿它去试下一个候选。
 const triedLabels = [];
 let autoNetError = false;
+let autoCheckpoint = false;
+let autoVerified = false;
+let anyExpired = false;
 for (const cand of autoCandidates) {
 if (context) { try { await context.close();} catch (_) { /* 忽略 */} context = null;}
 try {
@@ -687,36 +876,86 @@ continue;
 }
 page = context.pages()[0] || (await context.newPage());
 page.setDefaultTimeout(config.actionTimeoutMs);
-try {
-await page.goto(config.baseUrl + '/', { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs});
-} catch (e) {
-console.log('打开 Instagram 失败：' + (e && e.message? e.message.split('\n')[0]: e));
+const v = await verifyImportedLogin(page, context, { candidateLabel: cand.label, headed: !args.headless });
+if (v.ok) {
+autoVerified = true;
+username = v.username; // 可能为 null：已登录但没识别出用户名，照样继续
+if (username) {
+console.log('会话文件 ' + cand.label + ' 核验通过，当前登录账号：@' + username);
+} else {
+console.log('会话文件 ' + cand.label + ' 核验通过：已登录（没识别出用户名，继续）。');
+}
+break;
+}
+if (v.reason === 'network_error') {
+console.log('打开 Instagram 失败（网络问题）。');
 stopWith('network_error');
 autoNetError = true;
 break;
 }
-await smallPause();
-const uname = await detectLoggedInUsername(page);
-if (!uname) {
-triedLabels.push(cand.label);
-console.log('会话文件 ' + cand.label + ' 已失效（session_expired），换下一个候选试。');
-continue;
-}
-username = uname;
-console.log('会话文件 ' + cand.label + ' 核验通过，当前登录账号：@' + username);
+if (v.reason === 'checkpoint') {
+// 检查点是账号/网络层面的事，拿下一个号硬试只会连环触发，整轮停
+stopWith('checkpoint');
+autoCheckpoint = true;
 break;
 }
-if (autoNetError) return finish(0);
-if (!username) {
-console.log('自动模式：候选会话全部失效，已逐个试过：' + triedLabels.join('、'));
+if (v.reason === 'session_expired') anyExpired = true;
+triedLabels.push(cand.label + '（' + (v.reason === 'session_expired' ? 'session_expired' : '未能确认登录态') + '）');
+console.log('会话文件 ' + cand.label + (v.reason === 'session_expired'
+? ' 已失效（session_expired），换下一个候选试。'
+: ' 未能确认登录态，换下一个候选试。'));
+continue;
+}
+if (autoNetError || autoCheckpoint) return finish(0);
+if (!autoVerified) {
+console.log('自动模式：候选会话全都没通过核验，已逐个试过：' + triedLabels.join('、'));
+if (anyExpired) {
 console.log('请让卖家重新给一份有效的 cookie 文件放进 cookies 文件夹，或改用 --account / --manual 登录。');
 stopWith('session_expired');
+} else {
+console.log('没能确认登录态（不是判失效）：先看 out/debug-*.png 截图确认页面当时长什么样，再决定重跑还是换文件。');
+stopWith('not_logged_in');
+}
 return finish(0);
 }
 } else {
 page = context.pages()[0] || (await context.newPage());
 page.setDefaultTimeout(config.actionTimeoutMs);
 
+if (importMode) {
+// 导入模式走基于证据的核验（verifyImportedLogin 自己负责打开首页）：
+// 准绳是“上下文有 sessionid + 不在登录 URL + 无可见密码框”，两轮都
+// 过不了严格登录墙才判 session_expired；用户名读不到不算失败。
+const v = await verifyImportedLogin(page, context, { candidateLabel: importMode, headed: !args.headless });
+if (!v.ok) {
+if (v.reason === 'checkpoint') {
+console.log('导入的会话触发了 IG 的验证/检查点，本次按 checkpoint 停止，不硬闯。');
+stopWith('checkpoint');
+return finish(0);
+}
+if (v.reason === 'network_error') {
+console.log('打开 Instagram 失败（网络问题）。');
+stopWith('network_error');
+return finish(0);
+}
+if (v.reason === 'session_expired') {
+console.log('导入的会话文件没通过登录核验：两轮核验后仍是登录页，会话未被服务器接受。');
+console.log('IG 到底给脚本看了什么，看 out/debug-*.png 这张截图。');
+console.log('本次按 session_expired 停止，不自动改走密码登录；请重新登录小号后导出新的会话文件再导入。');
+stopWith('session_expired');
+return finish(0);
+}
+console.log('导入的会话文件没能确认登录态（不是判失效）：先看 out/debug-*.png 截图确认页面当时长什么样。');
+stopWith('not_logged_in');
+return finish(0);
+}
+username = v.username; // 可能为 null：已登录但没识别出用户名，照样继续
+if (username) {
+console.log('会话文件核验通过，当前登录账号：@' + username);
+} else {
+console.log('会话文件核验通过：已登录（没识别出用户名，继续）。');
+}
+} else {
 try {
 await page.goto(config.baseUrl + '/', { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs});
 } catch (e) {
@@ -728,14 +967,6 @@ await smallPause();
 
 username = await detectLoggedInUsername(page);
 }
-if (importMode) {
-if (!username) {
-console.log('导入的会话文件没通过登录核验：账号可能已退出登录、改过密码或被平台过期。');
-console.log('本次按 session_expired 停止，不自动改走密码登录；请重新登录小号后导出新的会话文件再导入。');
-stopWith('session_expired');
-return finish(0);
-}
-console.log('会话文件核验通过，当前登录账号：@' + username);
 }
 if (!importMode && username && selected && guard.normalizeUsername(username) !== guard.normalizeUsername(selected.username)) {
 console.log('注意：这个账号的浏览器配置里已经登录的是 @' + username + '，不是所选的 @' + selected.username + '，本次不停号混用，先停下。');
@@ -743,7 +974,7 @@ console.log('如要换账号，请先在浏览器窗口里退出 @' + username +
 stopWith('account_mismatch');
 return finish(0);
 }
-if (!importMode && !username && selected) {
+if (!importMode && !autoCandidates && !username && selected) {
 const loginResult = await autoLogin(page, selected);
 if (!loginResult.ok) {
 stopWith(loginResult.reason);
@@ -751,7 +982,7 @@ return finish(0);
 }
 username = loginResult.username;
 }
-if (!importMode && !username) {
+if (!importMode && !autoCandidates && !username) {
 const stop0 = await checkStop(page);
 if (args.headless) {
 console.log('当前未登录（无头模式下不能手动登录）。请先用有窗口模式运行一次并手动登录小号。');
@@ -784,8 +1015,14 @@ console.log('实际登录的是 @' + username + '，与所选账号 @' + selecte
 return finish(0);
 }
 
+// 导入/自动模式下用户名可能没识别出来（已登录照样继续）：到这里再尽力
+// 补检一次，补到了照样过下面的黑名单判定，补不到就带着 null 继续。
+if (!username && (importMode || autoCandidates)) {
+username = await detectLoggedInUsername(page);
+}
+
 output.stats.account = username;
-console.log('当前登录账号：@' + username);
+console.log(username ? '当前登录账号：@' + username : '当前已登录（没识别出用户名，继续采集）。');
 
 if (guard.isBlockedUsername(username, config.blocklist)) {
 console.log('错误：当前登录的是受保护的主号 @' + username + '，绝不能用主号采集，已立即中止。');
@@ -795,7 +1032,12 @@ return finish(2);
 }
 
 // 登录确认且黑名单检查已过：导出/刷新会话文件，之后可凭文件直登
+// （没识别出用户名时跳过导出：文件名要靠用户名，硬写会互相覆盖）
+if (username) {
 await exportSessionState(context, username);
+} else {
+console.log('没识别出用户名，本次跳过会话导出（不影响采集）。');
+}
 
 // ---- 话题页搜帖 ----
 const tagUrl = config.tagsUrl(args.keyword);
