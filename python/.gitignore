@@ -1,0 +1,10 @@
+__pycache__/
+.setup-done-py
+cookies/*
+!cookies/README-放这里.md
+cookies.txt
+cookies.json
+out/
+browser-profile/
+sessions/
+accounts.txt
