@@ -100,16 +100,23 @@ async function main() {
     assert.strictEqual(res.body.toString('ascii', 0, 2), 'PK');
     ok('GET /api/export.xlsx returns an xlsx (zip) payload', () => {});
 
+    // 1b) 博主模式两个新输入框在页面上
+    assert.ok(html.includes('id="minFollowers"') && html.includes('value="10000"'), '页面应有博主最低粉丝输入（默认 10000）');
+    assert.ok(html.includes('id="bloggers"') && html.includes('value="5"'), '页面应有每词博主数输入（默认 5）');
+    ok('console page carries the blogger-mode inputs (minFollowers/bloggers)', () => {});
+
     // 5) 启动一轮（假 runner 接住）
-    res = await req(port, 'POST', '/api/start', { keywords: ['downjacket', 'bags'], posts: 5 });
+    res = await req(port, 'POST', '/api/start', { keywords: ['downjacket', 'bags'], posts: 5, minFollowers: 3000, bloggers: 2 });
     assert.strictEqual(res.status, 200);
     assert.strictEqual(JSON.parse(res.body.toString('utf8')).ok, true);
     await sleep(50);
     assert.ok(captured, 'runner 没有被调用');
     assert.deepStrictEqual(captured.runOpts.keywords, ['downjacket', 'bags']);
     assert.strictEqual(captured.runOpts.posts, 5);
+    assert.strictEqual(captured.runOpts.minFollowers, 3000);
+    assert.strictEqual(captured.runOpts.bloggers, 2);
     assert.strictEqual(captured.control.stopFlag.stopped, false);
-    ok('POST /api/start invokes the injected runner with keywords+posts', () => {});
+    ok('POST /api/start invokes the injected runner with keywords+posts+blogger params', () => {});
 
     // 6) 并发再启动 → 409
     res = await req(port, 'POST', '/api/start', { keywords: ['other'], posts: 5 });

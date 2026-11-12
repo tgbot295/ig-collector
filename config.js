@@ -49,6 +49,21 @@ module.exports = {
     scrollRoundsMax: 15, // 话题页最多滚动轮数
   },
 
+  // 博主模式（默认开）：先按关键词找卖货博主（商家 + 粉丝够多），再采
+  // 他们帖子下面的意向评论。--no-blogger-mode 回到话题帖直采。
+  blogger: {
+    minFollowersDefault: 10000, // 入选博主的最低粉丝数（--min-followers）
+    minFollowersMax: 100000000,
+    bloggersDefault: 5,         // 每个关键词最多选几个博主（--bloggers）
+    bloggersMax: 20,
+    postsPerBloggerDefault: 10, // 每个博主最多采几条帖子（--posts-per-blogger）
+    postsPerBloggerMax: 50,
+    candidatePosts: 60,         // 找候选时话题页最多收集多少条帖子链接
+    fastPassPosts: 30,          // 找候选时最多快速打开多少条帖子认发帖人
+    ownersMax: 20,              // 候选博主名单上限
+    gridScrollRounds: 6,        // 博主主页网格最多滚动轮数
+  },
+
   // 人类节奏：主要动作之间随机停 3–6 秒（写死）
   delays: { minMs: 3000, maxMs: 6000 },
 

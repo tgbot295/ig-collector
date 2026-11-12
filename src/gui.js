@@ -72,17 +72,25 @@ const PAGE_HTML = `<!DOCTYPE html>
 </head>
 <body>
 <h1>IG 采集控制台</h1>
-<div class="sub">关键词按 Hashtag 搜索；登录用脚本的自动模式（cookies 文件夹 / accounts.txt），和命令行完全一致。主号黑名单、限速、停止条件都照旧写死。</div>
+<div class="sub">博主模式（默认）：先按关键词找粉丝多的卖货博主，再采他们帖子下面的意向评论。登录用脚本的自动模式（cookies 文件夹 / accounts.txt），和命令行完全一致。主号黑名单、限速、停止条件都照旧写死。</div>
 
 <label for="keywords">关键词（每行一个，最多 10 个）</label>
 <textarea id="keywords" rows="5">downjacket</textarea>
 
 <div class="row">
-  <label for="posts" style="margin:0">每词帖子数</label>
+  <label for="posts" style="margin:0">每词帖子数（直采模式用）</label>
   <input id="posts" type="number" value="50" min="1" max="50">
   <button id="btnStart" class="primary">开始采集</button>
   <button id="btnStop" disabled>停止</button>
   <span class="status" id="status">空闲</span>
+</div>
+
+<div class="row">
+  <label for="minFollowers" style="margin:0">博主最低粉丝</label>
+  <input id="minFollowers" type="number" value="10000" min="0" step="1000">
+  <label for="bloggers" style="margin:0">每词博主数</label>
+  <input id="bloggers" type="number" value="5" min="1" max="20">
+  <span class="status">博主模式：每个博主最多采 10 条帖子；筛不到博主时自动回退话题直采</span>
 </div>
 
 <div class="cards">
@@ -133,11 +141,15 @@ function pollState() {
 document.getElementById('btnStart').addEventListener('click', function () {
   var words = document.getElementById('keywords').value.split(/\\r?\\n/).map(function (s) { return s.trim(); }).filter(Boolean);
   var posts = parseInt(document.getElementById('posts').value, 10) || 50;
+  var minFollowers = parseInt(document.getElementById('minFollowers').value, 10);
+  if (isNaN(minFollowers) || minFollowers < 0) minFollowers = 10000;
+  var bloggers = parseInt(document.getElementById('bloggers').value, 10);
+  if (isNaN(bloggers) || bloggers < 1) bloggers = 5;
   if (!words.length) { alert('先填至少一个关键词'); return; }
   fetch('/api/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ keywords: words, posts: posts })
+    body: JSON.stringify({ keywords: words, posts: posts, minFollowers: minFollowers, bloggers: bloggers })
   }).then(function (r) {
     return r.json().then(function (d) { return { status: r.status, body: d }; });
   }).then(function (res) {
@@ -182,7 +194,8 @@ function sendJson(res, code, obj) {
 // - port：监听端口（默认 config.guiPort；传 0 = 随机端口，测试用）
 // - storeFile：累积存储文件（默认 config.storeFile；测试可指临时文件）
 // - runner：async (runOpts, control) => void，runOpts 含
-//   { keywords, posts, log }，control = { stopFlag: { stopped } }。
+//   { keywords, posts, minFollowers, bloggers, log }，
+//   control = { stopFlag: { stopped } }。
 //   不给 runner 时「开始采集」会明确报错，不会假装在跑。
 // 只绑 127.0.0.1（写死回环，不接受外部绑定参数）。
 function createGuiServer(opts) {
@@ -272,17 +285,23 @@ function createGuiServer(opts) {
         let posts = parseInt(body.posts, 10);
         if (!Number.isFinite(posts) || posts < 1) posts = config.limits.postsDefault;
         posts = Math.min(posts, config.limits.postsMax);
+        let minFollowers = parseInt(body.minFollowers, 10);
+        if (!Number.isFinite(minFollowers) || minFollowers < 0) minFollowers = config.blogger.minFollowersDefault;
+        minFollowers = Math.min(minFollowers, config.blogger.minFollowersMax);
+        let bloggers = parseInt(body.bloggers, 10);
+        if (!Number.isFinite(bloggers) || bloggers < 1) bloggers = config.blogger.bloggersDefault;
+        bloggers = Math.min(bloggers, config.blogger.bloggersMax);
         running = true;
         control = { stopFlag: { stopped: false } };
         const thisControl = control;
-        pushLog('———— 控制台启动一轮采集：关键词 ' + keywords.map((k) => '#' + k).join('、') + '，每词最多 ' + posts + ' 帖 ————');
+        pushLog('———— 控制台启动一轮采集：关键词 ' + keywords.map((k) => '#' + k).join('、') + '，博主模式（最低粉丝 ' + minFollowers + '，每词博主数 ' + bloggers + '），直采每词最多 ' + posts + ' 帖 ————');
         // 不 await：请求先返回，采集在后台跑，日志走 /api/log 轮询。
         Promise.resolve()
-          .then(() => runner({ keywords: keywords, posts: posts, log: pushLog }, thisControl))
+          .then(() => runner({ keywords: keywords, posts: posts, minFollowers: minFollowers, bloggers: bloggers, log: pushLog }, thisControl))
           .then(() => pushLog('———— 本轮采集结束 ————'))
           .catch((e) => pushLog('采集出错：' + (e && e.message ? e.message : e)))
           .then(() => { running = false; if (control === thisControl) control = null; });
-        sendJson(res, 200, { ok: true, keywords: keywords, posts: posts });
+        sendJson(res, 200, { ok: true, keywords: keywords, posts: posts, minFollowers: minFollowers, bloggers: bloggers });
         return;
       }
       if (req.method === 'POST' && p === '/api/stop') {

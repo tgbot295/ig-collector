@@ -25,6 +25,7 @@ const intent = require('./src/intent');
 const leadsOut = require('./src/leadsOut');
 const storeMod = require('./src/store');
 const xlsxMod = require('./src/xlsx');
+const bloggersMod = require('./src/bloggers');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const randInt = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
@@ -46,8 +47,21 @@ console.log([
 '    多个关键词在同一个浏览器会话里按顺序跑（只登录一次），每个关键词',
 '    各有一份小结，名单合并去重后一起出。采集时至少给一个关键词',
 '    （--gui / --export-xlsx / --check-cookies 除外）。',
-' --posts 本次每个关键词最多采多少条帖子，默认 50（已是硬上限）',
+' --posts 只在直采模式（--no-blogger-mode）下用：每个关键词最多采多少',
+'    条话题帖，默认 50（已是硬上限）。博主模式下每词预算是',
+'    博主数 × 每博主帖数（见下面 --bloggers / --posts-per-blogger），',
+'    --posts 不起作用。',
 ' --comments 每条帖子最多读多少条评论，默认 50',
+'博主模式（默认开）：先按关键词找卖货博主（商家号、粉丝够多），再采',
+'    他们帖子下面的意向评论，比在话题页上乱点帖子精准。三步：① 快速扫',
+'    话题帖认出发帖人 → ② 逐个看博主主页，筛商家+粉丝数 → ③ 只采选中',
+'    博主的帖子。某个关键词一个合格博主都没筛到时，自动回退到话题帖',
+'    直采，不会空手。',
+' --no-blogger-mode 关掉博主模式，回到原来的话题帖直采（--posts 生效）。',
+' --min-followers N 入选博主的最低粉丝数，默认 10000。粉丝数读不到的',
+'    博主一律不入选（要的是“粉丝量比较多”，必须是看得见的数）。',
+' --bloggers N 每个关键词最多选几个博主，默认 5，上限 20。',
+' --posts-per-blogger N 每个选中博主最多采几条帖子，默认 10，上限 50。',
 ' --rescan 重采以前采过的帖子。默认会先查累积存储（data/store.json）：',
 '    话题页找到的帖子链接里，以前采过的整帖跳过（每个关键词都会报',
 '    “跳过已采帖子 N 条”）；采过的帖子和意向名单都攒在累积存储里，',
@@ -129,7 +143,7 @@ return out;
 }
 
 function parseArgs(argv) {
-const args = { keyword: '', keywords: [], posts: config.limits.postsDefault, comments: config.limits.commentsDefault, headless: false, help: false, account: '', manual: false, importSession: '', importCookies: '', cookiesDir: config.cookiesDir, browser: '', checkCookies: false, maxAgeDays: 365, keepAll: false, merchantFilter: false, rescan: false, gui: false, exportXlsx: null };
+const args = { keyword: '', keywords: [], posts: config.limits.postsDefault, comments: config.limits.commentsDefault, headless: false, help: false, account: '', manual: false, importSession: '', importCookies: '', cookiesDir: config.cookiesDir, browser: '', checkCookies: false, maxAgeDays: 365, keepAll: false, merchantFilter: false, rescan: false, gui: false, exportXlsx: null, bloggerMode: true, minFollowers: config.blogger.minFollowersDefault, bloggers: config.blogger.bloggersDefault, postsPerBlogger: config.blogger.postsPerBloggerDefault };
 const keywordInputs = [];
 for (let i = 0; i < argv.length; i++) {
 const a = argv[i];
@@ -148,6 +162,14 @@ else args.exportXlsx = '';
 else if (a.startsWith('--export-xlsx=')) args.exportXlsx = a.slice('--export-xlsx='.length).trim();
 else if (a === '--merchant-filter') args.merchantFilter = true;
 else if (a === '--no-merchant-filter') args.merchantFilter = false;
+else if (a === '--blogger-mode') args.bloggerMode = true;
+else if (a === '--no-blogger-mode') args.bloggerMode = false;
+else if (a === '--min-followers') args.minFollowers = parseInt(argv[++i], 10);
+else if (a.startsWith('--min-followers=')) args.minFollowers = parseInt(a.slice('--min-followers='.length), 10);
+else if (a === '--bloggers') args.bloggers = parseInt(argv[++i], 10);
+else if (a.startsWith('--bloggers=')) args.bloggers = parseInt(a.slice('--bloggers='.length), 10);
+else if (a === '--posts-per-blogger') args.postsPerBlogger = parseInt(argv[++i], 10);
+else if (a.startsWith('--posts-per-blogger=')) args.postsPerBlogger = parseInt(a.slice('--posts-per-blogger='.length), 10);
 else if (a === '--max-age-days') args.maxAgeDays = parseInt(argv[++i], 10);
 else if (a.startsWith('--max-age-days=')) args.maxAgeDays = parseInt(a.slice('--max-age-days='.length), 10);
 else if (a === '--import-session') args.importSession = String(argv[++i] || '').trim();
@@ -177,6 +199,12 @@ args.posts = Math.min(args.posts, config.limits.postsMax);
 if (!Number.isFinite(args.comments) || args.comments < 1) args.comments = config.limits.commentsDefault;
 args.comments = Math.min(args.comments, config.limits.commentsMax);
 if (!Number.isFinite(args.maxAgeDays) || args.maxAgeDays < 0) args.maxAgeDays = 365;
+if (!Number.isFinite(args.minFollowers) || args.minFollowers < 0) args.minFollowers = config.blogger.minFollowersDefault;
+args.minFollowers = Math.min(Math.floor(args.minFollowers), config.blogger.minFollowersMax);
+if (!Number.isFinite(args.bloggers) || args.bloggers < 1) args.bloggers = config.blogger.bloggersDefault;
+args.bloggers = Math.min(Math.floor(args.bloggers), config.blogger.bloggersMax);
+if (!Number.isFinite(args.postsPerBlogger) || args.postsPerBlogger < 1) args.postsPerBlogger = config.blogger.postsPerBloggerDefault;
+args.postsPerBlogger = Math.min(Math.floor(args.postsPerBlogger), config.blogger.postsPerBloggerMax);
 return args;
 }
 
@@ -816,6 +844,8 @@ port: config.guiPort,
 runner: (runOpts, control) => runCollect({
 keywords: runOpts.keywords,
 posts: runOpts.posts,
+minFollowers: runOpts.minFollowers,
+bloggers: runOpts.bloggers,
 log: runOpts.log,
 control: control,
 }),
@@ -842,6 +872,7 @@ return 0;
 
 // 程序化入口（图形控制台用）：opts = { keywords 或 keyword, posts,
 // comments, maxAgeDays, keepAll, merchantFilter, rescan, headless,
+// bloggerMode, minFollowers, bloggers, postsPerBlogger,
 // account, manual, log, control }。log 给了函数时，本轮所有 console.log
 // 在打到终端的同时也镜像一份给它（控制台页面靠它实时显示）。
 async function runCollect(opts) {
@@ -874,6 +905,11 @@ base.keyword = base.keywords.length > 0 ? base.keywords[0] : '';
 if (Number.isFinite(o.posts)) base.posts = Math.min(Math.max(1, Math.floor(o.posts)), config.limits.postsMax);
 if (Number.isFinite(o.comments)) base.comments = Math.min(Math.max(1, Math.floor(o.comments)), config.limits.commentsMax);
 if (Number.isFinite(o.maxAgeDays) && o.maxAgeDays >= 0) base.maxAgeDays = o.maxAgeDays;
+if (Number.isFinite(o.minFollowers) && o.minFollowers >= 0) base.minFollowers = Math.min(Math.floor(o.minFollowers), config.blogger.minFollowersMax);
+if (Number.isFinite(o.bloggers) && o.bloggers >= 1) base.bloggers = Math.min(Math.floor(o.bloggers), config.blogger.bloggersMax);
+if (Number.isFinite(o.postsPerBlogger) && o.postsPerBlogger >= 1) base.postsPerBlogger = Math.min(Math.floor(o.postsPerBlogger), config.blogger.postsPerBloggerMax);
+if (o.bloggerMode === false) base.bloggerMode = false;
+if (o.bloggerMode === true) base.bloggerMode = true;
 if (o.keepAll) base.keepAll = true;
 if (o.merchantFilter) base.merchantFilter = true;
 if (o.rescan) base.rescan = true;
@@ -881,6 +917,335 @@ if (o.headless) base.headless = true;
 if (o.manual) base.manual = true;
 if (o.account) base.account = String(o.account);
 return base;
+}
+
+// ================= 采集流水线（博主模式三步 / 话题直采共用） =================
+// ctx = { args, output, storeState, checkedPosts, runCheckedUrls,
+//         stopRequested, stopWith }，由 runCollectFromArgs 组装。
+// 三道筛选、累积存储跳过、停止条件都只有这一份实现，直采和博主模式
+// 走的是同一条逐帖处理，不会两边漂移。
+
+// 逐帖全套处理（直采和博主模式共用）：打开帖子 → 停检 → 提取 →
+// 新鲜度筛选 → 商家筛选（默认关）→ 读评论 → 意向预筛 → 进结果+计数。
+// 返回 true 表示已触发停止（stopWith 已调用），调用方应立即收尾。
+async function processPost(page, link, kw, ctx, kwStats, index, total) {
+const args = ctx.args;
+const output = ctx.output;
+try {
+await page.goto(link.url, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs });
+} catch (e) {
+console.log('帖子 ' + (index + 1) + '/' + total + ' 打开失败，跳过：' + link.url);
+await humanPause();
+return false;
+}
+await humanPause();
+
+const stop = await checkStop(page);
+if (stop) { ctx.stopWith(stop.reason); return true; }
+
+const data = await extractPostData(page, link);
+const post = data.post;
+post.keyword = kw;
+
+// 筛选一：新鲜度。发布时间已知且超过 --max-age-days 的，在读评论之前
+// 整帖跳过（不进结果、省时间）；发布时间未知的照常采（已标 unknown）。
+const ageDecision = filters.decidePostAge({
+timestamp: post.timestamp, now: Date.now(), maxAgeDays: args.maxAgeDays,
+});
+if (ageDecision.action === 'skip') {
+output.stats.postsSkippedOld++;
+kwStats.postsSkippedOld++;
+ctx.checkedPosts.push({ postUrl: link.url, keyword: kw, checkedAt: new Date().toISOString() });
+console.log('跳过旧帖 ' + link.shortCode + '：发布于 ' +
+String(post.timestamp).slice(0, 10) + '（超过 ' + args.maxAgeDays + ' 天）');
+await humanPause();
+return false;
+}
+if (!post.timestamp) {
+console.log('帖子 ' + link.shortCode + ' 发布时间未知，照常采集。');
+}
+
+// 筛选二：商家帖（默认关）。命中的售卖信号照常挂在帖子条目上
+// （merchantSignals）供下游复用；只有显式加 --merchant-filter 时，
+// 文案没有任何售卖信号的路人帖才跳过、不采评论、不进结果。
+const mSignals = filters.merchantSignalsOf(post.caption);
+if (args.merchantFilter && mSignals.length === 0) {
+output.stats.postsSkippedNonMerchant++;
+kwStats.postsSkippedNonMerchant++;
+console.log('跳过非商家帖 @' + (post.ownerUsername || '未知') + '（文案无售卖信号）');
+await humanPause();
+return false;
+}
+post.merchantSignals = mSignals;
+
+const cres = await collectPostComments(page, link, args.comments, data);
+const allComments = cres.comments;
+if (extractDom.needsPostDebug(post, allComments)) {
+await savePostDebugEvidence(page, link, index, cres.meta);
+}
+
+// 筛选三：评论意向预筛（默认开）。只有带购买意向的评论进结果，意向
+// 类别挂在每条保留评论的 intentTypes 上；没意向的只计数不存。
+// --keep-all 时全部保留（intentTypes 照样标）。下游分析工具从
+// latestComments 重新推导线索，保留下来的正好全是意向评论，兼容不变。
+const filtered = intent.filterCommentsByIntent(allComments, args.keepAll);
+const comments = filtered.kept;
+post.latestComments = comments;
+output.items.push(post);
+for (const c of comments) output.items.push(c);
+ctx.checkedPosts.push({ postUrl: link.url, keyword: kw, checkedAt: new Date().toISOString() });
+output.stats.postsCollected++;
+kwStats.postsCollected++;
+output.stats.commentsCollected += comments.length;
+output.stats.commentsSeen += filtered.seen;
+kwStats.commentsSeen += filtered.seen;
+output.stats.commentsKeptIntent += filtered.intentCount;
+kwStats.commentsKeptIntent += filtered.intentCount;
+if (args.keepAll) {
+console.log('已采集帖子 ' + (index + 1) + '/' + total + '：@' +
+(post.ownerUsername || '未知') + '，评论共 ' + filtered.seen +
+' 条（--keep-all 全部保留，其中意向 ' + filtered.intentCount + ' 条）');
+} else {
+console.log('已采集帖子 ' + (index + 1) + '/' + total + '：@' +
+(post.ownerUsername || '未知') + '，评论共 ' + filtered.seen +
+' 条，意向 ' + filtered.intentCount + ' 条');
+}
+await humanPause();
+return false;
+}
+
+// 打开话题页并滚动收集帖子链接（上限 limit 条）。
+// 返回 { links, stopped }。
+async function collectTagLinks(page, kw, ctx, limit) {
+const tagUrl = config.tagsUrl(kw);
+console.log('正在打开话题页：#' + kw);
+try {
+await page.goto(tagUrl, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs });
+} catch (e) {
+console.log('打开话题页失败：' + (e && e.message ? e.message.split('\n')[0] : e));
+ctx.stopWith('network_error');
+return { links: [], stopped: true };
+}
+await humanPause();
+
+let stop = await checkStop(page);
+if (stop) { ctx.stopWith(stop.reason); return { links: [], stopped: true }; }
+
+const linkMap = new Map();
+for (let round = 0; round < config.limits.scrollRoundsMax && linkMap.size < limit; round++) {
+if (ctx.stopRequested()) { ctx.stopWith('user_stop'); return { links: [], stopped: true }; }
+let hrefs = [];
+try {
+hrefs = await page.evaluate(() =>
+Array.from(document.querySelectorAll('a[href]')).map((a) => a.getAttribute('href')));
+} catch (_) { /* 忽略 */}
+for (const l of extract.extractPostLinksFromHrefs(hrefs)) {
+if (!linkMap.has(l.shortCode)) linkMap.set(l.shortCode, l);
+}
+if (linkMap.size >= limit) break;
+try { await page.mouse.wheel(0, 1600); } catch (_) { /* 忽略 */}
+await smallPause();
+stop = await checkStop(page);
+if (stop) { ctx.stopWith(stop.reason); return { links: [], stopped: true }; }
+}
+return { links: Array.from(linkMap.values()), stopped: false };
+}
+
+// 累积存储跳过：以前采过的帖子（data/store.json）和本轮已处理过的
+// 链接都跳过（--rescan 时不查累积存储）；跳过数计进 kwStats 并打印。
+function filterStoredLinks(links, ctx, kwStats) {
+const fresh = [];
+let skippedStored = 0;
+for (const l of links) {
+const seen = ctx.runCheckedUrls.has(l.url);
+const stored = !ctx.args.rescan && storeMod.hasPost(ctx.storeState, l.url);
+if (seen || stored) skippedStored++;
+else fresh.push(l);
+}
+if (skippedStored > 0) {
+if (ctx.args.rescan) {
+console.log('跳过本轮已采帖子 ' + skippedStored + ' 条');
+} else {
+console.log('跳过已采帖子 ' + skippedStored + ' 条（以前或本轮已采过；加 --rescan 可重采）');
+}
+}
+kwStats.postsSkippedStored += skippedStored;
+ctx.output.stats.postsSkippedStored = (ctx.output.stats.postsSkippedStored || 0) + skippedStored;
+return fresh;
+}
+
+// 话题帖直采（原有流水线）：话题页链接 → 存储跳过 → 逐帖全套处理。
+// 返回 true 表示已触发停止。
+async function collectFromHashtag(page, kw, ctx, kwStats) {
+const args = ctx.args;
+const got = await collectTagLinks(page, kw, ctx, args.posts);
+if (got.stopped) return true;
+const fresh = filterStoredLinks(got.links, ctx, kwStats);
+const links = fresh.slice(0, args.posts);
+kwStats.postsFound += links.length;
+ctx.output.stats.postsFound += links.length;
+console.log('话题页共找到帖子链接 ' + links.length + ' 条，开始逐条采集…');
+for (let i = 0; i < links.length; i++) {
+if (ctx.stopRequested()) { ctx.stopWith('user_stop'); return true; }
+const link = links[i];
+ctx.runCheckedUrls.add(link.url);
+const stopped = await processPost(page, link, kw, ctx, kwStats, i, links.length);
+if (stopped || ctx.output.stats.stopped) return true;
+}
+return false;
+}
+
+// 博主模式第一步（找候选人）：话题页收集链接后，快速打开前若干条
+// 帖子，只读作者+文案（不读评论、这些帖子不记进累积存储），按首次
+// 出现收齐候选人（带上他们的一句文案，给后面判商家补信号用）。
+// 返回 { owners: [{ username, captions }], stopped }。
+async function collectCandidateOwners(page, kw, ctx) {
+console.log('博主模式：先在话题里找卖货博主（扫帖认人中）…');
+const got = await collectTagLinks(page, kw, ctx, config.blogger.candidatePosts);
+if (got.stopped) return { owners: [], stopped: true };
+const passLinks = got.links.slice(0, config.blogger.fastPassPosts);
+console.log('话题页收集到 ' + got.links.length + ' 条帖子链接，快速打开其中 ' +
+passLinks.length + ' 条认发帖人（不读评论）…');
+const owners = [];
+const seen = new Set();
+for (let i = 0; i < passLinks.length; i++) {
+if (owners.length >= config.blogger.ownersMax) break;
+if (ctx.stopRequested()) { ctx.stopWith('user_stop'); return { owners: owners, stopped: true }; }
+const link = passLinks[i];
+try {
+await page.goto(link.url, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs });
+} catch (e) {
+console.log('候选帖 ' + (i + 1) + '/' + passLinks.length + ' 打开失败，跳过：' + link.url);
+continue;
+}
+await smallPause();
+const stop = await checkStop(page);
+if (stop) { ctx.stopWith(stop.reason); return { owners: owners, stopped: true }; }
+const data = await extractPostData(page, link);
+const uname = data && data.post ? String(data.post.ownerUsername || '').trim() : '';
+if (uname && !seen.has(uname.toLowerCase())) {
+seen.add(uname.toLowerCase());
+owners.push({ username: uname, captions: data.post.caption ? [data.post.caption] : [] });
+console.log('博主候选人 ' + owners.length + '：@' + uname);
+}
+await smallPause();
+}
+console.log('共找到博主候选人 ' + owners.length + ' 位，开始逐个看主页筛商家和粉丝数…');
+return { owners: owners, stopped: false };
+}
+
+// 博主模式第二步（评估博主）：逐个打开候选人主页，读粉丝数/商家标记/
+// 简介，逐行打印评估表，再按规则（商家 + 粉丝已知 + 达门槛）选博主。
+// 返回 { candidates, selected, stopped }。
+async function evaluateBloggers(page, owners, ctx) {
+const args = ctx.args;
+const candidates = [];
+for (let i = 0; i < owners.length; i++) {
+if (ctx.stopRequested()) { ctx.stopWith('user_stop'); return { candidates: candidates, selected: [], stopped: true }; }
+const owner = owners[i];
+try {
+await page.goto(config.baseUrl + '/' + encodeURIComponent(owner.username) + '/', { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs });
+} catch (e) {
+console.log('博主候选 @' + owner.username + ' 的主页打开失败，跳过。');
+continue;
+}
+await smallPause();
+const stop = await checkStop(page);
+if (stop) { ctx.stopWith(stop.reason); return { candidates: candidates, selected: [], stopped: true }; }
+let profile = null;
+try {
+profile = await page.evaluate(bloggersMod.harvestProfileInPage, owner.username);
+} catch (_) { /* 读不到就给空，粉丝按未知处理 */ }
+const cand = bloggersMod.evaluateProfileCandidate({
+username: owner.username,
+followers: profile ? profile.followers : null,
+isBusiness: profile ? profile.isBusiness : null,
+category: profile ? profile.category : null,
+bio: profile ? profile.bio : null,
+captions: owner.captions,
+});
+candidates.push(cand);
+const fTxt = bloggersMod.formatFollowersFull(cand.followers);
+const sigParts = cand.signals.slice();
+if (cand.isBusiness) sigParts.unshift('商家号标记');
+const sigTxt = sigParts.length > 0 ? sigParts.join('、') : '无';
+if (!cand.merchant) {
+console.log('博主候选 @' + cand.username + '：粉丝 ' + fTxt + '，商家✗ 跳过');
+} else if (cand.followers === null) {
+console.log('博主候选 @' + cand.username + '：粉丝 未知，商家✓（信号：' + sigTxt + '），但粉丝数读不到，跳过');
+} else if (cand.followers < args.minFollowers) {
+console.log('博主候选 @' + cand.username + '：粉丝 ' + fTxt + '，商家✓（信号：' + sigTxt + '），粉丝不足（门槛 ' + bloggersMod.formatFollowersFull(args.minFollowers) + '），跳过');
+} else {
+console.log('博主候选 @' + cand.username + '：粉丝 ' + fTxt + '，商家✓（信号：' + sigTxt + '）');
+}
+await humanPause();
+}
+const selected = bloggersMod.selectBloggers(candidates, { minFollowers: args.minFollowers, topN: args.bloggers });
+if (selected.length > 0) {
+console.log('选中博主 ' + selected.length + ' 个：' +
+selected.map((b) => '@' + b.username + '(' + bloggersMod.formatFollowers(b.followers) + ')').join(' '));
+} else {
+console.log('选中博主 0 个（要商家、且粉丝数看得见、≥ ' + bloggersMod.formatFollowersFull(args.minFollowers) + '）。');
+}
+return { candidates: candidates, selected: selected, stopped: false };
+}
+
+// 博主模式第三步（采博主的帖子）：逐个选中博主开主页，从主页网格收
+// 帖子链接（滚几轮，封顶 postsPerBlogger），存储跳过后逐帖走和直采
+// 完全相同的全套处理。博主帖的 keyword 记成来源关键词。
+// 返回 true 表示已触发停止。
+async function collectFromBloggers(page, kw, selected, ctx, kwStats) {
+const args = ctx.args;
+for (let bi = 0; bi < selected.length; bi++) {
+if (ctx.stopRequested()) { ctx.stopWith('user_stop'); return true; }
+const blogger = selected[bi];
+console.log('正在采博主 @' + blogger.username + '（' + bloggersMod.formatFollowers(blogger.followers) +
+'粉丝）的帖子（第 ' + (bi + 1) + '/' + selected.length + ' 个博主）…');
+try {
+await page.goto(config.baseUrl + '/' + encodeURIComponent(blogger.username) + '/', { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs });
+} catch (e) {
+console.log('博主 @' + blogger.username + ' 的主页打开失败，跳过这个博主。');
+continue;
+}
+await humanPause();
+let stop = await checkStop(page);
+if (stop) { ctx.stopWith(stop.reason); return true; }
+const linkMap = new Map();
+for (let round = 0; round < config.blogger.gridScrollRounds && linkMap.size < args.postsPerBlogger; round++) {
+if (ctx.stopRequested()) { ctx.stopWith('user_stop'); return true; }
+let hrefs = [];
+try {
+hrefs = await page.evaluate(() =>
+Array.from(document.querySelectorAll('a[href]')).map((a) => a.getAttribute('href')));
+} catch (_) { /* 忽略 */}
+for (const l of extract.extractPostLinksFromHrefs(hrefs)) {
+if (!linkMap.has(l.shortCode)) linkMap.set(l.shortCode, l);
+}
+if (linkMap.size >= args.postsPerBlogger) break;
+try { await page.mouse.wheel(0, 1600); } catch (_) { /* 忽略 */}
+await smallPause();
+stop = await checkStop(page);
+if (stop) { ctx.stopWith(stop.reason); return true; }
+}
+const gridLinks = Array.from(linkMap.values());
+if (gridLinks.length === 0) {
+console.log('博主 @' + blogger.username + ' 主页没读到帖子，跳过。');
+continue;
+}
+const fresh = filterStoredLinks(gridLinks, ctx, kwStats);
+const links = fresh.slice(0, args.postsPerBlogger);
+kwStats.postsFound += links.length;
+ctx.output.stats.postsFound += links.length;
+console.log('博主 @' + blogger.username + ' 主页找到帖子 ' + links.length + ' 条，开始逐条采集…');
+for (let i = 0; i < links.length; i++) {
+if (ctx.stopRequested()) { ctx.stopWith('user_stop'); return true; }
+const link = links[i];
+ctx.runCheckedUrls.add(link.url);
+const stopped = await processPost(page, link, kw, ctx, kwStats, i, links.length);
+if (stopped || ctx.output.stats.stopped) return true;
+}
+}
+return false;
 }
 
 async function runCollectFromArgs(args, control) {
@@ -1327,6 +1692,8 @@ console.log('没识别出用户名，本次跳过会话导出（不影响采集�
 // 自己的话题页、各自计一份小结，帖子条目打上 keyword 标记，结果合并成
 // 一份输出（名单 CSV 跨关键词合并去重，见 finish/saveOutput）。
 const runCheckedUrls = new Set(); // 本轮已处理过的帖子链接（跨关键词去重，不重复打开）；checkedPosts 在函数开头已声明
+// 流水线上下文：博主三步、话题直采、逐帖处理共用同一份状态
+const collCtx = { args: args, output: output, storeState: storeState, checkedPosts: checkedPosts, runCheckedUrls: runCheckedUrls, stopRequested: stopRequested, stopWith: stopWith };
 output.stats.byKeyword = {};
 
 for (let ki = 0; ki < args.keywords.length; ki++) {
@@ -1336,166 +1703,38 @@ const kwStats = {
 postsFound: 0, postsCollected: 0, postsSkippedOld: 0,
 postsSkippedNonMerchant: 0, postsSkippedStored: 0,
 commentsSeen: 0, commentsKeptIntent: 0,
+bloggersEvaluated: 0, bloggersSelected: 0,
 };
 output.stats.byKeyword[kw] = kwStats;
 console.log('');
 console.log('===== 关键词 ' + (ki + 1) + '/' + args.keywords.length + '：#' + kw + ' =====');
 
-const tagUrl = config.tagsUrl(kw);
-console.log('正在打开话题页：#' + kw);
-try {
-await page.goto(tagUrl, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs });
-} catch (e) {
-console.log('打开话题页失败：' + (e && e.message ? e.message.split('\n')[0] : e));
-stopWith('network_error');
-break;
-}
-await humanPause();
-
-let stop = await checkStop(page);
-if (stop) { stopWith(stop.reason); break; }
-
-const linkMap = new Map();
-for (let round = 0; round < config.limits.scrollRoundsMax && linkMap.size < args.posts; round++) {
-if (stopRequested()) { stopWith('user_stop'); break; }
-let hrefs = [];
-try {
-hrefs = await page.evaluate(() =>
-Array.from(document.querySelectorAll('a[href]')).map((a) => a.getAttribute('href')));
-} catch (_) { /* 忽略 */}
-for (const l of extract.extractPostLinksFromHrefs(hrefs)) {
-if (!linkMap.has(l.shortCode)) linkMap.set(l.shortCode, l);
-}
-if (linkMap.size >= args.posts) break;
-try { await page.mouse.wheel(0, 1600); } catch (_) { /* 忽略 */}
-await smallPause();
-stop = await checkStop(page);
-if (stop) { stopWith(stop.reason); break; }
-}
-if (output.stats.stopped) break;
-
-// 累积存储跳过：链接先查 data/store.json，以前采过的帖子整帖跳过
-// （--rescan 时不查，全部重采）；本轮内已处理过的链接同样跳过。
-let foundLinks = Array.from(linkMap.values());
-let skippedStored = 0;
-if (!args.rescan) {
-const freshLinks = [];
-for (const l of foundLinks) {
-if (storeMod.hasPost(storeState, l.url) || runCheckedUrls.has(l.url)) skippedStored++;
-else freshLinks.push(l);
-}
-foundLinks = freshLinks;
-if (skippedStored > 0) {
-console.log('跳过已采帖子 ' + skippedStored + ' 条（以前或本轮已采过；加 --rescan 可重采）');
-}
-} else if (runCheckedUrls.size > 0) {
-const freshLinks = [];
-for (const l of foundLinks) {
-if (runCheckedUrls.has(l.url)) skippedStored++;
-else freshLinks.push(l);
-}
-foundLinks = freshLinks;
-if (skippedStored > 0) console.log('跳过本轮已采帖子 ' + skippedStored + ' 条');
-}
-kwStats.postsSkippedStored = skippedStored;
-output.stats.postsSkippedStored = (output.stats.postsSkippedStored || 0) + skippedStored;
-
-const links = foundLinks.slice(0, args.posts);
-kwStats.postsFound = links.length;
-output.stats.postsFound += links.length;
-console.log('话题页共找到帖子链接 ' + links.length + ' 条，开始逐条采集…');
-
-// ---- 逐帖采集 ----
-for (let i = 0; i < links.length; i++) {
-if (stopRequested()) { stopWith('user_stop'); break; }
-const link = links[i];
-runCheckedUrls.add(link.url);
-try {
-await page.goto(link.url, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs });
-} catch (e) {
-console.log('帖子 ' + (i + 1) + '/' + links.length + ' 打开失败，跳过：' + link.url);
-await humanPause();
-continue;
-}
-await humanPause();
-
-stop = await checkStop(page);
-if (stop) { stopWith(stop.reason); break; }
-
-const data = await extractPostData(page, link);
-const post = data.post;
-post.keyword = kw;
-
-// 筛选一：新鲜度。发布时间已知且超过 --max-age-days 的，在读评论之前
-// 整帖跳过（不进结果、省时间）；发布时间未知的照常采（已标 unknown）。
-const ageDecision = filters.decidePostAge({
-timestamp: post.timestamp, now: Date.now(), maxAgeDays: args.maxAgeDays,
-});
-if (ageDecision.action === 'skip') {
-output.stats.postsSkippedOld++;
-kwStats.postsSkippedOld++;
-checkedPosts.push({ postUrl: link.url, keyword: kw, checkedAt: new Date().toISOString() });
-console.log('跳过旧帖 ' + link.shortCode + '：发布于 ' +
-String(post.timestamp).slice(0, 10) + '（超过 ' + args.maxAgeDays + ' 天）');
-await humanPause();
-continue;
-}
-if (!post.timestamp) {
-console.log('帖子 ' + link.shortCode + ' 发布时间未知，照常采集。');
-}
-
-// 筛选二：商家帖（默认关，用户 2026-11-12 拍板不要商家过滤：只要有评论
-// 且有意向评论就采）。命中的售卖信号照常挂在帖子条目上（merchantSignals）
-// 供下游复用；只有显式加 --merchant-filter 时，文案没有任何售卖信号的
-// 路人帖才跳过、不采评论、不进结果。
-const mSignals = filters.merchantSignalsOf(post.caption);
-if (args.merchantFilter && mSignals.length === 0) {
-output.stats.postsSkippedNonMerchant++;
-kwStats.postsSkippedNonMerchant++;
-console.log('跳过非商家帖 @' + (post.ownerUsername || '未知') + '（文案无售卖信号）');
-await humanPause();
-continue;
-}
-post.merchantSignals = mSignals;
-
-const cres = await collectPostComments(page, link, args.comments, data);
-const allComments = cres.comments;
-if (extractDom.needsPostDebug(post, allComments)) {
-await savePostDebugEvidence(page, link, i, cres.meta);
-}
-
-// 筛选三：评论意向预筛（默认开）。只有带购买意向的评论进结果，意向
-// 类别挂在每条保留评论的 intentTypes 上；没意向的只计数不存。
-// --keep-all 时全部保留（intentTypes 照样标）。下游分析工具从
-// latestComments 重新推导线索，保留下来的正好全是意向评论，兼容不变。
-const filtered = intent.filterCommentsByIntent(allComments, args.keepAll);
-const comments = filtered.kept;
-post.latestComments = comments;
-output.items.push(post);
-for (const c of comments) output.items.push(c);
-checkedPosts.push({ postUrl: link.url, keyword: kw, checkedAt: new Date().toISOString() });
-output.stats.postsCollected++;
-kwStats.postsCollected++;
-output.stats.commentsCollected += comments.length;
-output.stats.commentsSeen += filtered.seen;
-kwStats.commentsSeen += filtered.seen;
-output.stats.commentsKeptIntent += filtered.intentCount;
-kwStats.commentsKeptIntent += filtered.intentCount;
-if (args.keepAll) {
-console.log('已采集帖子 ' + (i + 1) + '/' + links.length + '：@' +
-(post.ownerUsername || '未知') + '，评论共 ' + filtered.seen +
-' 条（--keep-all 全部保留，其中意向 ' + filtered.intentCount + ' 条）');
+if (args.bloggerMode) {
+// 博主模式：先找卖货博主，再采他们的帖子；一个合格博主都没有时
+// 自动回退到话题帖直采，这个关键词不会空手。
+const cand = await collectCandidateOwners(page, kw, collCtx);
+if (!cand.stopped) {
+kwStats.bloggersEvaluated = cand.owners.length;
+const ev = await evaluateBloggers(page, cand.owners, collCtx);
+if (!ev.stopped) {
+kwStats.bloggersSelected = ev.selected.length;
+if (ev.selected.length === 0) {
+console.log('该关键词没筛到符合的博主，回退到话题帖直采');
+await collectFromHashtag(page, kw, collCtx, kwStats);
 } else {
-console.log('已采集帖子 ' + (i + 1) + '/' + links.length + '：@' +
-(post.ownerUsername || '未知') + '，评论共 ' + filtered.seen +
-' 条，意向 ' + filtered.intentCount + ' 条');
+await collectFromBloggers(page, kw, ev.selected, collCtx, kwStats);
 }
-await humanPause();
 }
+}
+} else {
+await collectFromHashtag(page, kw, collCtx, kwStats);
+}
+
 
 console.log('关键词 #' + kw + ' 小结：采集帖子 ' + kwStats.postsCollected +
 ' 条，跳过已采 ' + kwStats.postsSkippedStored + ' 条，跳过旧帖 ' + kwStats.postsSkippedOld +
-' 条；评论共看到 ' + kwStats.commentsSeen + ' 条，意向保留 ' + kwStats.commentsKeptIntent + ' 条。');
+' 条；评论共看到 ' + kwStats.commentsSeen + ' 条，意向保留 ' + kwStats.commentsKeptIntent + ' 条' +
+(args.bloggerMode ? '；博主评估 ' + kwStats.bloggersEvaluated + ' 个，选中 ' + kwStats.bloggersSelected + ' 个' : '') + '。');
 if (output.stats.stopped) break;
 }
 
